@@ -82,6 +82,30 @@ test('prepareWorkspace publishes user skills as skills, commands and catalog', (
   assert.ok(!fs.existsSync(path.join(paths.workspace, '.claude/commands/weekly-retro.md')));
 });
 
+test('prepareWorkspace symlinks existing vaults into vaults/ and skips missing ones', () => {
+  const paths = tmpPaths();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-vault-'));
+  const realVault = path.join(root, 'personal');
+  fs.mkdirSync(realVault, { recursive: true });
+  fs.writeFileSync(path.join(realVault, 'index.md'), '# personal');
+  writeRegistry(paths.registry, [
+    { name: 'personal', path: realVault, kind: 'open' },
+    { name: 'ghost', path: path.join(root, 'does-not-exist'), kind: 'open' },
+  ]);
+
+  prepareWorkspace(paths);
+
+  const link = path.join(paths.workspace, 'vaults', 'personal');
+  assert.ok(fs.lstatSync(link).isSymbolicLink());
+  assert.equal(fs.readFileSync(path.join(link, 'index.md'), 'utf8'), '# personal');
+  assert.ok(!fs.existsSync(path.join(paths.workspace, 'vaults', 'ghost')));
+
+  // 볼트를 제거하면 다음 실행에서 링크도 사라진다.
+  writeRegistry(paths.registry, []);
+  prepareWorkspace(paths);
+  assert.ok(!fs.existsSync(path.join(paths.workspace, 'vaults', 'personal')));
+});
+
 test('prepareWorkspace fails with setup guidance when config is missing', () => {
   assert.throws(() => prepareWorkspace(tmpPaths()), /llmwiki setup/);
 });

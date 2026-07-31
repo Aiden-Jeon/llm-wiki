@@ -14,10 +14,12 @@ export const SUPPORTED_AGENTS = ['claude', 'codex'];
 
 const AGENT_HEADER = `## 에이전트 실행 명령
 
-논리 이름(claude/codex)을 다른 실행 명령으로 재정의합니다. 명령은 공백으로 나뉜 토큰으로 실행되며(예: \`isaac codex\`), 볼트 \`--add-dir\` 인자가 뒤에 붙습니다.
+논리 이름(claude/codex)을 다른 실행 명령으로 재정의합니다. 명령은 공백으로 나뉜 토큰으로 실행됩니다(예: \`dbexec repo run isaac codex\`).
 
-| agent | command |
-|-------|---------|`;
+add-dir 열이 \`yes\`면 등록된 볼트를 \`--add-dir <경로>\`로 넘깁니다(claude/codex 기본). vibe처럼 이 플래그를 받지 않는 wrapper는 \`no\`로 두며, 볼트는 워크스페이스의 \`vaults/\` 심볼릭 링크로 노출됩니다.
+
+| agent | command | add-dir |
+|-------|---------|---------|`;
 
 function validateField(label, value, { required = false } = {}) {
   const text = String(value ?? '').trim();
@@ -59,7 +61,14 @@ export function normalizeAgentCommand(agent) {
     throw new Error(`agent는 ${SUPPORTED_AGENTS.join(' 또는 ')}여야 합니다.`);
   }
   const command = validateField('command', agent.command, { required: true });
-  return { name, command };
+  return { name, command, addDir: agent.addDir !== false };
+}
+
+// 표의 add-dir 셀(yes/no)을 boolean으로 해석한다. 레거시 2열 항목은 기본 true.
+function parseAddDir(cell) {
+  const text = String(cell ?? '').trim().toLowerCase();
+  if (['no', 'false', 'off', '0'].includes(text)) return false;
+  return true;
 }
 
 /**
@@ -91,13 +100,13 @@ export function parseRegistryFile(content) {
     const raw = line.trim();
 
     if (section === 'agent') {
-      if (cells.length !== 2) {
-        issues.push({ line: lineNumber, raw, message: `열이 정확히 2개(agent/command) 필요하지만 ${cells.length}개입니다.` });
+      if (cells.length !== 2 && cells.length !== 3) {
+        issues.push({ line: lineNumber, raw, message: `열이 2개(agent/command) 또는 3개(agent/command/add-dir) 필요하지만 ${cells.length}개입니다.` });
         continue;
       }
       let agent;
       try {
-        agent = normalizeAgentCommand({ name: cells[0], command: cells[1] });
+        agent = normalizeAgentCommand({ name: cells[0], command: cells[1], addDir: parseAddDir(cells[2]) });
       } catch (error) {
         issues.push({ line: lineNumber, raw, message: error.message });
         continue;
@@ -159,7 +168,7 @@ export function renderRegistry(vaults, agents = []) {
   if (agents.length) {
     const agentRows = agents.map((agent) => {
       const a = normalizeAgentCommand(agent);
-      return `| ${a.name} | ${a.command} |`;
+      return `| ${a.name} | ${a.command} | ${a.addDir ? 'yes' : 'no'} |`;
     });
     out += `\n${AGENT_HEADER}\n${agentRows.join('\n')}\n`;
   }

@@ -44,7 +44,7 @@ const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운영합�
   llmwiki vault show <name>       볼트 상세 정보 및 상태
   llmwiki vault remove <name>     볼트 제거
   llmwiki agent list [--json]     에이전트 실행 명령 매핑 확인
-  llmwiki agent set <name> <cmd>  claude/codex를 다른 명령으로 실행 (예: agent set codex isaac codex)
+  llmwiki agent set <name> [--add-dir] <cmd>  claude/codex를 다른 명령으로 실행
   llmwiki agent reset <name>      실행 명령을 기본값(claude/codex)으로 복원
   llmwiki skill list [--json]     등록된 커스텀 스킬 목록
   llmwiki skill add <name>        커스텀 스킬 생성/가져오기
@@ -78,10 +78,13 @@ skill add 옵션:
 
 에이전트 실행 명령:
   claude/codex는 논리 이름이며, 실제 실행 명령을 재정의할 수 있습니다.
-  예) claude가 vibe를, codex가 isaac codex를 실행하도록:
-    llmwiki agent set claude vibe
-    llmwiki agent set codex isaac codex
-  매핑은 설정 파일(llmwiki config path)에 저장되며 볼트 --add-dir 인자가 뒤에 붙습니다.
+  예) claude가 vibe를, codex가 isaac을 실행하도록:
+    llmwiki agent set claude vibe agent
+    llmwiki agent set codex dbexec repo run isaac
+  기본적으로 커스텀 명령에는 볼트 --add-dir 인자를 붙이지 않습니다(vibe 등은 이 플래그를
+  받지 않음). claude/codex 원본처럼 --add-dir를 붙이려면 --add-dir 플래그를 추가하세요.
+  --add-dir를 안 붙이는 경우에도 등록된 볼트는 워크스페이스의 vaults/ 심볼릭 링크로 노출됩니다.
+  매핑은 설정 파일(llmwiki config path)에 저장됩니다.
 
 환경 변수:
   LLM_WIKI_AGENT       기본 에이전트 (claude 또는 codex)
@@ -391,30 +394,52 @@ async function removeVault(paths, name, { confirm = false } = {}) {
 function listAgents(paths, args = []) {
   const { options, rest } = parseOptions(args, { allowed: ['json'], booleans: ['json'], usage: 'llmwiki agent list [--json]' });
   if (rest.length) throw new Error(`알 수 없는 인자: ${rest.join(' ')}\n사용법: llmwiki agent list [--json]`);
-  const overrides = new Map(readAgents(paths.registry).map((agent) => [agent.name, agent.command]));
+  const overrides = new Map(readAgents(paths.registry).map((agent) => [agent.name, agent]));
   const rows = SUPPORTED_AGENTS.map((name) => {
-    const command = overrides.get(name) ?? name;
-    return { agent: name, command, default: !overrides.has(name), installed: commandExists(splitCommand(command)[0] ?? name) };
+    const override = overrides.get(name);
+    const command = override ? override.command : name;
+    return {
+      agent: name,
+      command,
+      default: !override,
+      addDir: override ? override.addDir : true,
+      installed: commandExists(splitCommand(command)[0] ?? name),
+    };
   });
 
   if (options.json) {
     console.log(JSON.stringify({ registry: paths.registry, agents: rows }, null, 2));
     return;
   }
-  const lines = rows.map((row) => `${row.agent} → ${row.command}${row.default ? ' (기본값)' : ''} · ${row.installed ? '실행 가능' : '명령 없음'}`);
+  const lines = rows.map((row) => `${row.agent} → ${row.command}${row.default ? ' (기본값)' : ''} · add-dir ${row.addDir ? 'yes' : 'no'} · ${row.installed ? '실행 가능' : '명령 없음'}`);
   if (stdin.isTTY) p.note(lines.join('\n'), 'llmwiki · 에이전트 실행 명령');
   else for (const line of lines) console.log(line);
 }
 
+// set 명령의 인자에서 --add-dir/--no-add-dir 플래그만 뽑아내고 나머지는 명령 토큰으로 둔다.
+// 명령 자체(dbexec repo run isaac 등)에는 대개 대시 옵션이 없으므로 안전하다.
+function extractAddDirFlag(tokens) {
+  const command = [];
+  let addDir; // 미지정
+  for (const token of tokens) {
+    if (token === '--add-dir') addDir = true;
+    else if (token === '--no-add-dir') addDir = false;
+    else command.push(token);
+  }
+  return { command, addDir };
+}
+
 function setAgent(paths, name, commandTokens) {
-  if (!name) throw new Error('설정할 에이전트 이름이 필요합니다.\n사용법: llmwiki agent set <claude|codex> <명령...>');
-  if (!commandTokens.length) throw new Error(`실행 명령이 필요합니다.\n사용법: llmwiki agent set ${name} <명령...>  (예: llmwiki agent set codex isaac codex)`);
-  const agent = normalizeAgentCommand({ name, command: commandTokens.join(' ') });
+  if (!name) throw new Error('설정할 에이전트 이름이 필요합니다.\n사용법: llmwiki agent set <claude|codex> [--add-dir|--no-add-dir] <명령...>');
+  const { command, addDir } = extractAddDirFlag(commandTokens);
+  if (!command.length) throw new Error(`실행 명령이 필요합니다.\n사용법: llmwiki agent set ${name} <명령...>  (예: llmwiki agent set codex dbexec repo run isaac)`);
+  // 커스텀 wrapper는 대개 --add-dir를 받지 않으므로 기본 off. 필요하면 --add-dir로 켠다.
+  const agent = normalizeAgentCommand({ name, command: command.join(' '), addDir: addDir ?? false });
   ensureRegistry(paths);
   const agents = readAgents(paths.registry).filter((item) => item.name !== agent.name);
   agents.push(agent);
   writeRegistry(paths.registry, readRegistry(paths.registry), agents);
-  const message = `에이전트 설정 완료 · ${agent.name} → ${agent.command}`;
+  const message = `에이전트 설정 완료 · ${agent.name} → ${agent.command} · add-dir ${agent.addDir ? 'yes' : 'no'}`;
   if (stdin.isTTY) p.log.success(message);
   else console.log(message);
 }
@@ -598,7 +623,8 @@ function listSkillTemplates(paths) {
 }
 
 const WORKSPACE_DOCS = ['AGENTS.md', 'CLAUDE.md', 'WIKI-CLI.md', 'wikis.example.md'];
-const WORKSPACE_MANAGED = ['wikis.local.md', 'SKILLS.md', '.claude/commands/', '.claude/skills/'];
+const WORKSPACE_MANAGED = ['wikis.local.md', 'SKILLS.md', '.claude/commands/', '.claude/skills/', 'vaults/'];
+const VAULTS_DIRNAME = 'vaults';
 const WORKSPACE_NOTICE = `# 이 디렉터리는 llmwiki가 관리합니다
 
 라우팅 지침과 볼트 레지스트리를 한곳에 모아 에이전트를 실행하기 위한 작업 공간입니다.
@@ -607,10 +633,35 @@ const WORKSPACE_NOTICE = `# 이 디렉터리는 llmwiki가 관리합니다
   ${WORKSPACE_MANAGED.join(', ')}
 - 그대로 유지됨: 위 목록 이외의 파일 (예: .claude/settings.local.json)
 
+\`${VAULTS_DIRNAME}/\`는 등록된 볼트로 향하는 심볼릭 링크입니다. \`--add-dir\`를 받지
+않는 에이전트(예: vibe)도 이 링크로 볼트에 접근할 수 있습니다. 실제 볼트 경로는
+\`wikis.local.md\`에 있습니다.
+
 지침을 바꾸려면 이 디렉터리가 아니라 설치된 패키지를 수정하세요.
 볼트 등록 정보는 \`llmwiki config path\`가 알려주는 설정 파일에서 관리합니다.
 커스텀 스킬은 \`llmwiki skill\` 명령으로 관리합니다 (원본은 설정 디렉터리의 skills/).
 `;
+
+/**
+ * 등록된 볼트를 워크스페이스의 vaults/<name>으로 심볼릭 링크한다. --add-dir를 받지
+ * 않는 에이전트(vibe 등)도 cwd 하위에서 볼트에 접근할 수 있게 하는 통로다.
+ * 매 실행마다 새로 만들어 삭제·경로 변경을 반영한다.
+ */
+function syncVaultLinks(paths) {
+  const dir = path.join(paths.workspace, VAULTS_DIRNAME);
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  for (const vault of readRegistry(paths.registry)) {
+    if (!fs.existsSync(vault.path)) continue;
+    try {
+      fs.symlinkSync(vault.path, path.join(dir, vault.name), IS_WINDOWS ? 'junction' : 'dir');
+    } catch (error) {
+      const message = `볼트 링크 실패 · ${vault.name}: ${error.message}`;
+      if (stdin.isTTY) p.log.warn(message);
+      else console.error(`[WARN] ${message}`);
+    }
+  }
+}
 
 function syncDirectory(source, destination) {
   if (!fs.existsSync(source)) return;
@@ -666,6 +717,8 @@ export function prepareWorkspace(paths) {
   syncDirectory(path.join(paths.packageRoot, '.claude', 'commands'), path.join(paths.workspace, '.claude', 'commands'));
   syncSkills(paths);
 
+  syncVaultLinks(paths);
+
   const workspaceRegistry = path.join(paths.workspace, 'wikis.local.md');
   fs.copyFileSync(paths.registry, workspaceRegistry);
   try { fs.chmodSync(workspaceRegistry, 0o600); } catch { /* Windows may not support POSIX modes. */ }
@@ -682,15 +735,16 @@ function commandExists(command) {
 }
 
 /**
- * 논리 에이전트 이름(claude/codex)을 실제 실행 토큰 배열로 해소한다.
- * 레지스트리에 재정의가 있으면 그 명령을(예: `isaac codex` → ['isaac', 'codex']),
- * 없으면 이름 자체를 실행한다.
+ * 논리 에이전트 이름(claude/codex)을 실행 정보로 해소한다.
+ * - tokens: 실제 실행 토큰 배열(예: `dbexec repo run isaac` → ['dbexec','repo','run','isaac'])
+ * - addDir: 등록된 볼트를 `--add-dir <경로>`로 넘길지 여부
+ * 재정의가 없으면 이름 자체를 실행하고 --add-dir를 붙인다(claude/codex 기본).
  */
 function resolveAgentCommand(paths, name) {
   const override = readAgents(paths.registry).find((agent) => agent.name === name);
   const tokens = override ? splitCommand(override.command) : [name];
   if (!tokens.length) throw new Error(`${name} 에이전트 명령을 해석할 수 없습니다: ${override?.command}`);
-  return tokens;
+  return { tokens, addDir: override ? override.addDir : true };
 }
 
 function resolveAgent(paths, requested) {
@@ -702,7 +756,7 @@ function resolveAgent(paths, requested) {
   if (configured) return resolveAgent(paths, configured);
   // 자동 감지는 논리 이름이 아니라 실제로 실행될 명령의 존재 여부로 판단한다.
   for (const name of SUPPORTED_AGENTS) {
-    if (commandExists(resolveAgentCommand(paths, name)[0])) return name;
+    if (commandExists(resolveAgentCommand(paths, name).tokens[0])) return name;
   }
   throw new Error('Claude Code 또는 Codex를 찾을 수 없습니다. 설치하거나 `llmwiki agent set`으로 실행 명령을 지정하세요.');
 }
@@ -737,10 +791,12 @@ function doctor(paths) {
   const labels = { claude: 'Claude Code', codex: 'Codex' };
   const found = {};
   for (const name of SUPPORTED_AGENTS) {
-    const tokens = fs.existsSync(paths.registry) ? resolveAgentCommand(paths, name) : [name];
-    const custom = tokens.join(' ') !== name;
+    const { tokens, addDir } = fs.existsSync(paths.registry) ? resolveAgentCommand(paths, name) : { tokens: [name], addDir: true };
+    const command = tokens.join(' ');
+    const custom = command !== name;
     found[name] = commandExists(tokens[0]);
-    const detail = custom ? `${tokens.join(' ')}${found[name] ? ' · 실행 가능' : ' · 명령 없음'}` : (found[name] ? '설치됨' : '찾을 수 없음');
+    const state = found[name] ? (custom ? '실행 가능' : '설치됨') : (custom ? '명령 없음' : '찾을 수 없음');
+    const detail = custom ? `${command} · add-dir ${addDir ? 'yes' : 'no'} · ${state}` : state;
     add(found[name] ? 'success' : 'warn', labels[name], detail);
   }
   if (!Object.values(found).some(Boolean)) add('error', '에이전트', 'Claude Code 또는 Codex 설치 필요 (또는 llmwiki agent set)');
@@ -759,10 +815,12 @@ function doctor(paths) {
 async function start(paths, requestedAgent, agentArgs = []) {
   const workspace = prepareWorkspace(paths);
   const agent = resolveAgent(paths, requestedAgent);
-  const [command, ...commandArgs] = resolveAgentCommand(paths, agent);
-  const vaultArgs = readRegistry(paths.registry)
-    .filter((vault) => fs.existsSync(vault.path))
-    .flatMap((vault) => ['--add-dir', vault.path]);
+  const { tokens: [command, ...commandArgs], addDir } = resolveAgentCommand(paths, agent);
+  const vaultArgs = addDir
+    ? readRegistry(paths.registry)
+      .filter((vault) => fs.existsSync(vault.path))
+      .flatMap((vault) => ['--add-dir', vault.path])
+    : [];
   const label = command === agent ? agent : `${agent} → ${[command, ...commandArgs].join(' ')}`;
   console.log(`${label} 시작 (workspace: ${workspace})`);
   const child = runAsync(command, [...commandArgs, ...vaultArgs, ...agentArgs], {

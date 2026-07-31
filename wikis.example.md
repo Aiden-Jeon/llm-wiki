@@ -19,9 +19,11 @@
 
 ## 에이전트 실행 명령 (선택)
 
-`claude`/`codex` 논리 이름을 다른 실행 명령으로 재정의한다. 미설정 시 이름 그대로 실행한다. `llmwiki agent set <name> <cmd>`로 관리한다.
+`claude`/`codex` 논리 이름을 다른 실행 명령으로 재정의한다. 미설정 시 이름 그대로 실행한다. `llmwiki agent set <name> [--add-dir] <cmd>`로 관리한다.
 
-| agent | command |
-|-------|---------|
-| claude | vibe |
-| codex | isaac codex |
+add-dir 열이 `yes`면 등록된 볼트를 `--add-dir <경로>`로 넘긴다(claude/codex 기본). vibe처럼 이 플래그를 받지 않는 wrapper는 `no`로 두며, 볼트는 워크스페이스의 `vaults/` 심볼릭 링크로 노출된다.
+
+| agent | command | add-dir |
+|-------|---------|---------|
+| claude | vibe agent | no |
+| codex | dbexec repo run isaac | no |

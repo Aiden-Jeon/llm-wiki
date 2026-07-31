@@ -66,19 +66,39 @@ test('readRegistry is strict for writers and lenient when asked', () => {
   assert.deepEqual(readRegistry(file, { strict: false }).map((vault) => vault.name), ['ok']);
 });
 
-test('registry round-trips agent command overrides alongside vaults', () => {
+test('registry round-trips agent overrides with add-dir flag', () => {
   const vaults = [{ name: 'personal', path: '/tmp/v', kind: 'open', signals: '', notes: '' }];
-  const agents = [{ name: 'claude', command: 'vibe' }, { name: 'codex', command: 'isaac codex' }];
+  const agents = [
+    { name: 'claude', command: 'vibe agent', addDir: false },
+    { name: 'codex', command: 'dbexec repo run isaac', addDir: true },
+  ];
   const parsed = parseRegistryFile(renderRegistry(vaults, agents));
   assert.deepEqual(parsed.vaults, vaults);
   assert.deepEqual(parsed.agents, agents);
   assert.equal(parsed.issues.length, 0);
 });
 
-test('normalizeAgentCommand rejects unknown agents and empty commands', () => {
+test('normalizeAgentCommand defaults add-dir on and rejects bad input', () => {
+  assert.equal(normalizeAgentCommand({ name: 'claude', command: 'vibe' }).addDir, true);
+  assert.equal(normalizeAgentCommand({ name: 'claude', command: 'vibe', addDir: false }).addDir, false);
   assert.throws(() => normalizeAgentCommand({ name: 'gpt', command: 'x' }), /claude 또는 codex/);
   assert.throws(() => normalizeAgentCommand({ name: 'claude', command: '' }), /command 값이 필요/);
   assert.throws(() => normalizeAgentCommand({ name: 'claude', command: 'a | b' }), /\|/);
+});
+
+test('parseRegistryFile accepts legacy 2-col agents and yes/no add-dir', () => {
+  const content = [
+    '| agent | command | add-dir |',
+    '|-------|---------|---------|',
+    '| claude | vibe agent | no |',
+    '| codex | dbexec repo run isaac |', // 레거시 2열 → add-dir 기본 true
+  ].join('\n');
+  const { agents, issues } = parseRegistryFile(content);
+  assert.equal(issues.length, 0);
+  assert.deepEqual(agents, [
+    { name: 'claude', command: 'vibe agent', addDir: false },
+    { name: 'codex', command: 'dbexec repo run isaac', addDir: true },
+  ]);
 });
 
 test('parseRegistryFile reports broken and duplicate agent rows with line numbers', () => {
@@ -87,12 +107,12 @@ test('parseRegistryFile reports broken and duplicate agent rows with line number
     '|------|------|------|---------|-------|',
     '| ok | /tmp/ok | open |  |  |',
     '',
-    '| agent | command |',
-    '|-------|---------|',
-    '| claude | vibe |',
-    '| gpt | foo |',
-    '| codex | isaac codex | extra |',
-    '| claude | again |',
+    '| agent | command | add-dir |',
+    '|-------|---------|---------|',
+    '| claude | vibe | no |',
+    '| gpt | foo | no |',
+    '| codex | isaac | yes | extra |',
+    '| claude | again | no |',
   ].join('\n');
 
   const { vaults, agents, issues } = parseRegistryFile(content);
@@ -100,15 +120,16 @@ test('parseRegistryFile reports broken and duplicate agent rows with line number
   assert.deepEqual(agents.map((a) => a.name), ['claude']);
   assert.deepEqual(issues.map((i) => i.line), [8, 9, 10]);
   assert.match(issues[0].message, /claude 또는 codex/);
-  assert.match(issues[1].message, /2개/);
+  assert.match(issues[1].message, /2개.*또는.*3개|3개/);
   assert.match(issues[2].message, /중복/);
 });
 
 test('writeRegistry preserves existing agent overrides when saving vaults', () => {
   const file = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-')) + '/wikis.local.md';
-  writeRegistry(file, [{ name: 'a', path: '/tmp/a', kind: 'open' }], [{ name: 'codex', command: 'isaac codex' }]);
+  const override = { name: 'codex', command: 'dbexec repo run isaac', addDir: false };
+  writeRegistry(file, [{ name: 'a', path: '/tmp/a', kind: 'open' }], [override]);
   // 볼트만 다시 저장(agents 생략) — 매핑이 사라지면 안 된다.
   writeRegistry(file, [{ name: 'a', path: '/tmp/a', kind: 'open' }, { name: 'b', path: '/tmp/b', kind: 'open' }]);
-  assert.deepEqual(readAgents(file), [{ name: 'codex', command: 'isaac codex' }]);
+  assert.deepEqual(readAgents(file), [override]);
   assert.deepEqual(readRegistry(file).map((v) => v.name), ['a', 'b']);
 });
