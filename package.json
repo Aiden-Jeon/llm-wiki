@@ -1,0 +1,39 @@
+{
+  "name": "llm-wiki-cli",
+  "version": "0.1.0",
+  "description": "A lightweight router for operating multiple LLM-powered Markdown wikis",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "llmwiki": "bin/llmwiki.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    ".claude/commands/",
+    ".claude/skills/",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "WIKI-CLI.md",
+    "wikis.example.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test",
+    "start": "node bin/llmwiki.js"
+  },
+  "keywords": [
+    "llm",
+    "wiki",
+    "claude-code",
+    "codex",
+    "markdown"
+  ],
+  "dependencies": {
+    "@clack/prompts": "^0.11.0"
+  }
+}

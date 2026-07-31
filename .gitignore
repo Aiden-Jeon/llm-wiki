@@ -12,5 +12,9 @@ wikis.local.md
 credentials.*
 .mcp.json
 
+# Node.js
+node_modules/
+*.tgz
+
 # OS
 .DS_Store
