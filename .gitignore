@@ -1,0 +1,16 @@
+# 로컬 볼트 레지스트리 (사용자별 실제 경로) — 커밋 금지
+wikis.local.md
+
+# 로컬 Claude Code 설정 (토큰·자격증명 포함 가능) — 커밋 금지
+.claude/settings.local.json
+.claude/settings.json
+
+# 자격증명·환경
+.env
+.env.*
+*.key
+credentials.*
+.mcp.json
+
+# OS
+.DS_Store
