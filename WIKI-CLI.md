@@ -8,10 +8,11 @@
 
 CLI는 볼트 목록을 **레지스트리 파일**에서 읽는다. 경로를 이 문서에 하드코딩하지 않는다.
 
-- **`wikis.local.md`** — 실제 사용자 볼트 목록 (git 미추적, `.gitignore`).
-- **`wikis.example.md`** — 템플릿 (커밋됨). 처음 쓰는 사용자는 이를 복사해 `wikis.local.md`를 만든다.
+- **사용자 설정 원본** — `llmwiki setup`이 OS 표준 설정 디렉터리에 생성한다. 경로는 `llmwiki config path`로 확인한다.
+- **`wikis.local.md`** — CLI가 실행 워크스페이스에 사용자 설정 원본을 동기화한 레지스트리다.
+- **`wikis.example.md`** — 레지스트리 형식의 참고 템플릿이다.
 
-작업 시작 시 `wikis.local.md`를 읽어 등록된 볼트(name / path / kind / 라우팅 신호)를 파악한다. 파일이 없으면 사용자에게 `wikis.example.md`를 복사해 만들도록 안내한다.
+작업 시작 시 워크스페이스의 `wikis.local.md`를 읽어 등록된 볼트(name / path / kind / 라우팅 신호)를 파악한다. 파일이 없으면 사용자에게 `llmwiki setup`을 실행하도록 안내한다.
 
 각 볼트 항목의 필드:
 
