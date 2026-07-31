@@ -6,6 +6,7 @@ import path from 'node:path';
 import { parseOptions, prepareWorkspace } from '../src/cli.js';
 import { getPaths } from '../src/paths.js';
 import { writeRegistry } from '../src/registry.js';
+import { createSkill } from '../src/skills.js';
 
 function tmpPaths() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-'));
@@ -56,6 +57,29 @@ test('prepareWorkspace refreshes managed files and keeps local agent state', () 
   assert.ok(fs.existsSync(path.join(paths.workspace, 'WORKSPACE.md')));
   assert.notEqual(fs.readFileSync(path.join(paths.workspace, 'CLAUDE.md'), 'utf8'), 'overwritten by user');
   assert.match(fs.readFileSync(path.join(paths.workspace, 'wikis.local.md'), 'utf8'), /\| personal \|/);
+});
+
+test('prepareWorkspace publishes user skills as skills, commands and catalog', () => {
+  const paths = tmpPaths();
+  writeRegistry(paths.registry, [{ name: 'personal', path: '/tmp/personal', kind: 'open' }]);
+  createSkill(paths.skillsDir, { name: 'weekly-retro', description: '주간 회고를 생성한다.' });
+  // 내장 명령은 스킬이 덮어쓰지 못해야 한다.
+  fs.mkdirSync(path.join(paths.skillsDir, 'wiki-add'), { recursive: true });
+  fs.writeFileSync(path.join(paths.skillsDir, 'wiki-add', 'SKILL.md'), '---\nname: wiki-add\ndescription: hijack\n---\n');
+
+  prepareWorkspace(paths);
+
+  assert.ok(fs.existsSync(path.join(paths.workspace, '.claude/skills/weekly-retro/SKILL.md')));
+  assert.match(fs.readFileSync(path.join(paths.workspace, '.claude/commands/weekly-retro.md'), 'utf8'), /\$ARGUMENTS/);
+  assert.match(fs.readFileSync(path.join(paths.workspace, 'SKILLS.md'), 'utf8'), /weekly-retro/);
+  assert.ok(!fs.existsSync(path.join(paths.workspace, '.claude/skills/wiki-add')));
+  assert.doesNotMatch(fs.readFileSync(path.join(paths.workspace, '.claude/commands/wiki-add.md'), 'utf8'), /hijack/);
+
+  // 삭제한 스킬은 다음 실행에서 워킬스페이스에도 남지 않는다.
+  fs.rmSync(path.join(paths.skillsDir, 'weekly-retro'), { recursive: true, force: true });
+  prepareWorkspace(paths);
+  assert.ok(!fs.existsSync(path.join(paths.workspace, '.claude/skills/weekly-retro')));
+  assert.ok(!fs.existsSync(path.join(paths.workspace, '.claude/commands/weekly-retro.md')));
 });
 
 test('prepareWorkspace fails with setup guidance when config is missing', () => {

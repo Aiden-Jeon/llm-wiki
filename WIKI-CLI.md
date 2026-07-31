@@ -71,13 +71,21 @@ secure 볼트로 쓰기가 해소되면:
 2. 해소된 볼트의 **Query Filing** 워크플로우를 적용한다: 일회성이면 채팅으로만 답하고, 재사용 가치가 있으면 그 볼트 `wiki/analyses/`(또는 해당 볼트 규칙의 위치)에 파일링하고 index·log를 갱신한다.
 3. 크로스볼트 종합 답변은 기본적으로 일반 지식을 담는 `open` 볼트에 파일링한다.
 
-### linkedin-draft — LinkedIn 프로필 초안 생성
+## 커스텀 스킬
 
-커리어 자료가 있는 볼트를 대상으로 프로필 섹션(Headline/About/Experience) 초안을 생성한다. 텍스트 생성까지만(브라우저 자동화 없음). 상세는 `.claude/skills/linkedin-draft/SKILL.md` 참조. 대상 볼트는 라우팅으로 해소하되, 기본은 커리어 자료를 가진 `open` 볼트다.
+사용자마다 다른 작업(예: LinkedIn 프로필 초안, 주간 회고)은 라우터에 내장하지 않고 **커스텀 스킬**로 등록한다. 스킬 원본은 사용자 설정 디렉터리(`llmwiki skill path`)에 있고, 매 실행마다 이 워크스페이스의 `.claude/skills/`로 동기화된다.
+
+- **목록**: 자동 생성되는 [`SKILLS.md`](SKILLS.md) 카탈로그가 등록된 스킬·호출명·설명을 모아 준다. 직접 편집하지 않는다.
+- **정본**: 개별 스킬의 워크플로우는 `.claude/skills/<name>/SKILL.md`다.
+- **라우팅**: 스킬도 이 문서의 라우팅 절차를 그대로 따른다. 대상 볼트를 해소한 뒤 `cd <vault>`하고, `kind: secure` 볼트는 보안 확인·익명화 게이트를 거친다.
+- **관리**: 사용자가 스킬 추가·수정·삭제를 원하면 워크스페이스 파일을 직접 고치지 않고 `llmwiki skill add|edit|remove`를 안내한다(워크스페이스 사본은 매 실행 덮어써진다).
+- 내장 템플릿은 `llmwiki skill templates`로 확인한다 (예: `linkedin-draft`).
+
+스킬 이름은 내장 명령(`wiki-add`, `wiki-search`, `wiki-use`)과 중복할 수 없다.
 
 ## 듀얼 에이전트
 
-- **Claude Code**: 위 명령들은 `.claude/commands/*.md` 슬래시 명령으로 노출된다.
-- **Codex**: 동일 명령들이 `AGENTS.md` 태스크 목록으로 노출된다. 두 표면 모두 이 문서로 라우팅하고 볼트 `CLAUDE.md`로 위임한다.
+- **Claude Code**: 내장 명령과 커스텀 스킬이 모두 `.claude/commands/*.md` 슬래시 명령으로 노출된다(스킬 명령 파일은 CLI가 생성한다).
+- **Codex**: 내장 명령은 `AGENTS.md` 태스크 목록, 커스텀 스킬은 `SKILLS.md` 카탈로그로 노출된다. 두 표면 모두 이 문서로 라우팅하고 볼트 `CLAUDE.md`로 위임한다.
 
-모든 슬래시 명령은 `AGENTS.md`에 대응 태스크가 있어야 한다(패리티).
+내장 슬래시 명령은 `AGENTS.md`에 대응 태스크가 있어야 한다(패리티). 커스텀 스킬의 패리티는 `SKILLS.md`가 담당한다.

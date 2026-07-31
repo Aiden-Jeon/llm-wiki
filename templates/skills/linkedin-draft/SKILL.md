@@ -32,7 +32,7 @@ description: 위키의 커리어·resume 자료를 근거로 LinkedIn 프로필 
 | Headline / About 포지셔닝 | 커리어 방향/north-star, career-fit 분석 |
 | 역량·요약 표현 | 1-page resume 분석 페이지 |
 
-> 참고 — `personal-wiki-storage` 볼트의 실제 위치: Experience는 `wiki/entities/*-career.md`, 포지셔닝은 `wiki/analyses/career-north-star.md`·`career-fit-evaluation.md`, resume 표현은 `wiki/analyses/*resume*.md`.
+> 볼트에 따라 위치는 다르다. 예: Experience는 `wiki/entities/*-career.md`, 포지셔닝은 `wiki/analyses/career-*.md`, resume 표현은 `wiki/analyses/*resume*.md`. 실제 경로는 볼트 `index.md`로 확인한다.
 
 ## 워크플로우
 
