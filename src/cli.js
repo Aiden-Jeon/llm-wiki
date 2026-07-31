@@ -4,7 +4,15 @@ import { spawn, spawnSync } from 'node:child_process';
 import { stdin } from 'node:process';
 import * as p from '@clack/prompts';
 import { getPaths } from './paths.js';
-import { normalizeVault, readRegistry, readRegistryFile, writeRegistry } from './registry.js';
+import {
+  SUPPORTED_AGENTS,
+  normalizeAgentCommand,
+  normalizeVault,
+  readAgents,
+  readRegistry,
+  readRegistryFile,
+  writeRegistry,
+} from './registry.js';
 import {
   SKILL_FILE,
   createSkill,
@@ -35,6 +43,9 @@ const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운영합�
   llmwiki vault list [--json]     등록된 볼트 목록
   llmwiki vault show <name>       볼트 상세 정보 및 상태
   llmwiki vault remove <name>     볼트 제거
+  llmwiki agent list [--json]     에이전트 실행 명령 매핑 확인
+  llmwiki agent set <name> <cmd>  claude/codex를 다른 명령으로 실행 (예: agent set codex isaac codex)
+  llmwiki agent reset <name>      실행 명령을 기본값(claude/codex)으로 복원
   llmwiki skill list [--json]     등록된 커스텀 스킬 목록
   llmwiki skill add <name>        커스텀 스킬 생성/가져오기
   llmwiki skill show <name>       스킬 상세 정보
@@ -64,6 +75,13 @@ skill add 옵션:
 추가 정보:
   signals 요청을 이 볼트로 자동 연결할 주제·키워드 (예: 커리어, 이력서, 논문)
   notes   에이전트가 알아야 할 볼트의 용도·특이사항 (예: 커리어 자료 보유)
+
+에이전트 실행 명령:
+  claude/codex는 논리 이름이며, 실제 실행 명령을 재정의할 수 있습니다.
+  예) claude가 vibe를, codex가 isaac codex를 실행하도록:
+    llmwiki agent set claude vibe
+    llmwiki agent set codex isaac codex
+  매핑은 설정 파일(llmwiki config path)에 저장되며 볼트 --add-dir 인자가 뒤에 붙습니다.
 
 환경 변수:
   LLM_WIKI_AGENT       기본 에이전트 (claude 또는 codex)
@@ -370,6 +388,55 @@ async function removeVault(paths, name, { confirm = false } = {}) {
   return true;
 }
 
+function listAgents(paths, args = []) {
+  const { options, rest } = parseOptions(args, { allowed: ['json'], booleans: ['json'], usage: 'llmwiki agent list [--json]' });
+  if (rest.length) throw new Error(`알 수 없는 인자: ${rest.join(' ')}\n사용법: llmwiki agent list [--json]`);
+  const overrides = new Map(readAgents(paths.registry).map((agent) => [agent.name, agent.command]));
+  const rows = SUPPORTED_AGENTS.map((name) => {
+    const command = overrides.get(name) ?? name;
+    return { agent: name, command, default: !overrides.has(name), installed: commandExists(splitCommand(command)[0] ?? name) };
+  });
+
+  if (options.json) {
+    console.log(JSON.stringify({ registry: paths.registry, agents: rows }, null, 2));
+    return;
+  }
+  const lines = rows.map((row) => `${row.agent} → ${row.command}${row.default ? ' (기본값)' : ''} · ${row.installed ? '실행 가능' : '명령 없음'}`);
+  if (stdin.isTTY) p.note(lines.join('\n'), 'llmwiki · 에이전트 실행 명령');
+  else for (const line of lines) console.log(line);
+}
+
+function setAgent(paths, name, commandTokens) {
+  if (!name) throw new Error('설정할 에이전트 이름이 필요합니다.\n사용법: llmwiki agent set <claude|codex> <명령...>');
+  if (!commandTokens.length) throw new Error(`실행 명령이 필요합니다.\n사용법: llmwiki agent set ${name} <명령...>  (예: llmwiki agent set codex isaac codex)`);
+  const agent = normalizeAgentCommand({ name, command: commandTokens.join(' ') });
+  ensureRegistry(paths);
+  const agents = readAgents(paths.registry).filter((item) => item.name !== agent.name);
+  agents.push(agent);
+  writeRegistry(paths.registry, readRegistry(paths.registry), agents);
+  const message = `에이전트 설정 완료 · ${agent.name} → ${agent.command}`;
+  if (stdin.isTTY) p.log.success(message);
+  else console.log(message);
+}
+
+function resetAgent(paths, name) {
+  if (!name) throw new Error('초기화할 에이전트 이름이 필요합니다.\n사용법: llmwiki agent reset <claude|codex>');
+  if (!SUPPORTED_AGENTS.includes(name)) throw new Error(`agent는 ${SUPPORTED_AGENTS.join(' 또는 ')}여야 합니다.`);
+  ensureRegistry(paths);
+  const agents = readAgents(paths.registry);
+  const next = agents.filter((item) => item.name !== name);
+  if (next.length === agents.length) {
+    const message = `이미 기본값입니다 · ${name} → ${name}`;
+    if (stdin.isTTY) p.log.info(message);
+    else console.log(message);
+    return;
+  }
+  writeRegistry(paths.registry, readRegistry(paths.registry), next);
+  const message = `기본값으로 초기화 · ${name} → ${name}`;
+  if (stdin.isTTY) p.log.success(message);
+  else console.log(message);
+}
+
 function skillLine(skill) {
   return `${skill.name}${skill.description ? ` · ${skill.description}` : ''}`;
 }
@@ -614,16 +681,30 @@ function commandExists(command) {
   return true;
 }
 
-function resolveAgent(requested) {
+/**
+ * 논리 에이전트 이름(claude/codex)을 실제 실행 토큰 배열로 해소한다.
+ * 레지스트리에 재정의가 있으면 그 명령을(예: `isaac codex` → ['isaac', 'codex']),
+ * 없으면 이름 자체를 실행한다.
+ */
+function resolveAgentCommand(paths, name) {
+  const override = readAgents(paths.registry).find((agent) => agent.name === name);
+  const tokens = override ? splitCommand(override.command) : [name];
+  if (!tokens.length) throw new Error(`${name} 에이전트 명령을 해석할 수 없습니다: ${override?.command}`);
+  return tokens;
+}
+
+function resolveAgent(paths, requested) {
   if (requested) {
-    if (!['claude', 'codex'].includes(requested)) throw new Error(`지원하지 않는 에이전트입니다: ${requested}`);
+    if (!SUPPORTED_AGENTS.includes(requested)) throw new Error(`지원하지 않는 에이전트입니다: ${requested}`);
     return requested;
   }
   const configured = process.env.LLM_WIKI_AGENT;
-  if (configured) return resolveAgent(configured);
-  if (commandExists('claude')) return 'claude';
-  if (commandExists('codex')) return 'codex';
-  throw new Error('Claude Code 또는 Codex를 찾을 수 없습니다. 설치 후 다시 실행하세요.');
+  if (configured) return resolveAgent(paths, configured);
+  // 자동 감지는 논리 이름이 아니라 실제로 실행될 명령의 존재 여부로 판단한다.
+  for (const name of SUPPORTED_AGENTS) {
+    if (commandExists(resolveAgentCommand(paths, name)[0])) return name;
+  }
+  throw new Error('Claude Code 또는 Codex를 찾을 수 없습니다. 설치하거나 `llmwiki agent set`으로 실행 명령을 지정하세요.');
 }
 
 function doctor(paths) {
@@ -653,13 +734,16 @@ function doctor(paths) {
     else add('success', `스킬 ${skill.name}`, skill.description);
   }
 
-  const claude = commandExists('claude');
-  const codex = commandExists('codex');
-  if (claude) add('success', 'Claude Code', '설치됨');
-  else add('warn', 'Claude Code', '찾을 수 없음');
-  if (codex) add('success', 'Codex', '설치됨');
-  else add('warn', 'Codex', '찾을 수 없음');
-  if (!claude && !codex) add('error', '에이전트', 'Claude Code 또는 Codex 설치 필요');
+  const labels = { claude: 'Claude Code', codex: 'Codex' };
+  const found = {};
+  for (const name of SUPPORTED_AGENTS) {
+    const tokens = fs.existsSync(paths.registry) ? resolveAgentCommand(paths, name) : [name];
+    const custom = tokens.join(' ') !== name;
+    found[name] = commandExists(tokens[0]);
+    const detail = custom ? `${tokens.join(' ')}${found[name] ? ' · 실행 가능' : ' · 명령 없음'}` : (found[name] ? '설치됨' : '찾을 수 없음');
+    add(found[name] ? 'success' : 'warn', labels[name], detail);
+  }
+  if (!Object.values(found).some(Boolean)) add('error', '에이전트', 'Claude Code 또는 Codex 설치 필요 (또는 llmwiki agent set)');
 
   if (stdin.isTTY) {
     p.intro('llmwiki doctor');
@@ -674,12 +758,14 @@ function doctor(paths) {
 
 async function start(paths, requestedAgent, agentArgs = []) {
   const workspace = prepareWorkspace(paths);
-  const agent = resolveAgent(requestedAgent);
+  const agent = resolveAgent(paths, requestedAgent);
+  const [command, ...commandArgs] = resolveAgentCommand(paths, agent);
   const vaultArgs = readRegistry(paths.registry)
     .filter((vault) => fs.existsSync(vault.path))
     .flatMap((vault) => ['--add-dir', vault.path]);
-  console.log(`${agent} 시작 (workspace: ${workspace})`);
-  const child = runAsync(agent, [...vaultArgs, ...agentArgs], {
+  const label = command === agent ? agent : `${agent} → ${[command, ...commandArgs].join(' ')}`;
+  console.log(`${label} 시작 (workspace: ${workspace})`);
+  const child = runAsync(command, [...commandArgs, ...vaultArgs, ...agentArgs], {
     cwd: workspace,
     stdio: 'inherit',
     env: process.env,
@@ -739,6 +825,13 @@ export async function main(args) {
     if (action === 'show') return showVault(paths, vaultArgs[0]);
     if (action === 'remove') return removeVault(paths, vaultArgs[0], { confirm: true });
     throw new Error('사용법: llmwiki vault <add|list|show|remove>');
+  }
+  if (command === 'agent' || command === 'agents') {
+    const [action = 'list', name, ...commandTokens] = rest;
+    if (action === 'list' || action === 'ls') return listAgents(paths, rest.slice(1));
+    if (action === 'set') return setAgent(paths, name, commandTokens);
+    if (action === 'reset') return resetAgent(paths, name);
+    throw new Error('사용법: llmwiki agent <list|set|reset>');
   }
   if (command === 'skill' || command === 'skills') {
     const [action = 'list', ...skillArgs] = rest;

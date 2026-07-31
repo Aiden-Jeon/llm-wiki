@@ -16,3 +16,12 @@
 |------|------|------|---------|-------|
 | personal | /Users/you/wikis/personal | open | 커리어, resume, LinkedIn, 일반 AI/ML 학습, 논문, 공개 아티클 | 커리어 자료 보유 |
 | work | /Users/you/wikis/work | secure | 고객명, 사내 제품/기능, Slack/회의/내부 출처, 프로젝트 코드, 내부 URL | private 유지, 사례 익명화 |
+
+## 에이전트 실행 명령 (선택)
+
+`claude`/`codex` 논리 이름을 다른 실행 명령으로 재정의한다. 미설정 시 이름 그대로 실행한다. `llmwiki agent set <name> <cmd>`로 관리한다.
+
+| agent | command |
+|-------|---------|
+| claude | vibe |
+| codex | isaac codex |

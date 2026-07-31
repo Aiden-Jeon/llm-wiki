@@ -4,7 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import {
-  normalizeVault, parseRegistry, parseRegistryFile, readRegistry, renderRegistry, writeRegistry,
+  normalizeAgentCommand, normalizeVault, parseRegistry, parseRegistryFile,
+  readAgents, readRegistry, renderRegistry, writeRegistry,
 } from '../src/registry.js';
 
 test('registry markdown round-trip', () => {
@@ -63,4 +64,51 @@ test('readRegistry is strict for writers and lenient when asked', () => {
 
   assert.throws(() => readRegistry(file), (error) => error.message.includes(file) && /2개|행/.test(error.message));
   assert.deepEqual(readRegistry(file, { strict: false }).map((vault) => vault.name), ['ok']);
+});
+
+test('registry round-trips agent command overrides alongside vaults', () => {
+  const vaults = [{ name: 'personal', path: '/tmp/v', kind: 'open', signals: '', notes: '' }];
+  const agents = [{ name: 'claude', command: 'vibe' }, { name: 'codex', command: 'isaac codex' }];
+  const parsed = parseRegistryFile(renderRegistry(vaults, agents));
+  assert.deepEqual(parsed.vaults, vaults);
+  assert.deepEqual(parsed.agents, agents);
+  assert.equal(parsed.issues.length, 0);
+});
+
+test('normalizeAgentCommand rejects unknown agents and empty commands', () => {
+  assert.throws(() => normalizeAgentCommand({ name: 'gpt', command: 'x' }), /claude 또는 codex/);
+  assert.throws(() => normalizeAgentCommand({ name: 'claude', command: '' }), /command 값이 필요/);
+  assert.throws(() => normalizeAgentCommand({ name: 'claude', command: 'a | b' }), /\|/);
+});
+
+test('parseRegistryFile reports broken and duplicate agent rows with line numbers', () => {
+  const content = [
+    '| name | path | kind | signals | notes |',
+    '|------|------|------|---------|-------|',
+    '| ok | /tmp/ok | open |  |  |',
+    '',
+    '| agent | command |',
+    '|-------|---------|',
+    '| claude | vibe |',
+    '| gpt | foo |',
+    '| codex | isaac codex | extra |',
+    '| claude | again |',
+  ].join('\n');
+
+  const { vaults, agents, issues } = parseRegistryFile(content);
+  assert.deepEqual(vaults.map((v) => v.name), ['ok']);
+  assert.deepEqual(agents.map((a) => a.name), ['claude']);
+  assert.deepEqual(issues.map((i) => i.line), [8, 9, 10]);
+  assert.match(issues[0].message, /claude 또는 codex/);
+  assert.match(issues[1].message, /2개/);
+  assert.match(issues[2].message, /중복/);
+});
+
+test('writeRegistry preserves existing agent overrides when saving vaults', () => {
+  const file = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-')) + '/wikis.local.md';
+  writeRegistry(file, [{ name: 'a', path: '/tmp/a', kind: 'open' }], [{ name: 'codex', command: 'isaac codex' }]);
+  // 볼트만 다시 저장(agents 생략) — 매핑이 사라지면 안 된다.
+  writeRegistry(file, [{ name: 'a', path: '/tmp/a', kind: 'open' }, { name: 'b', path: '/tmp/b', kind: 'open' }]);
+  assert.deepEqual(readAgents(file), [{ name: 'codex', command: 'isaac codex' }]);
+  assert.deepEqual(readRegistry(file).map((v) => v.name), ['a', 'b']);
 });
