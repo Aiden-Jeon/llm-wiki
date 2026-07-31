@@ -6,7 +6,7 @@
 
 ## 설치
 
-Node.js 18 이상이 필요합니다.
+Node.js 18 이상이 필요합니다. macOS/Linux에서 검증했으며, Windows에서는 `.cmd` 셰임을 거친 에이전트 실행을 지원합니다.
 
 ### npm 패키지로 설치
 
@@ -45,6 +45,7 @@ llmwiki vault add \
   --notes "커리어 자료 보유"
 
 llmwiki vault list
+llmwiki vault list --json     # 스크립트/CI용 기계 판독 출력
 llmwiki vault show personal
 llmwiki vault remove personal
 llmwiki doctor
@@ -104,13 +105,15 @@ llmwiki start codex -- --model gpt-5
 
 CLI는 사용자 데이터 디렉터리에 관리형 실행 워크스페이스를 준비하고 레지스트리를 동기화한 뒤 에이전트를 실행합니다. 따라서 현재 디렉터리와 관계없이 동일한 라우팅 지침과 설정으로 시작됩니다.
 
+워크스페이스에서 매 실행마다 갱신되는 항목은 라우팅 지침 문서(`AGENTS.md`, `CLAUDE.md`, `WIKI-CLI.md`, `wikis.example.md`), `wikis.local.md`, `.claude/commands/`, `.claude/skills/`입니다. 그 이외의 파일은 그대로 유지되므로 `.claude/settings.local.json`에 쌓인 Claude Code 권한 승인을 매번 다시 하지 않아도 됩니다. 자세한 설명은 워크스페이스의 `WORKSPACE.md`에 있습니다.
+
 ## 명령
 
 | 명령 | 설명 |
 |------|------|
 | `llmwiki setup` | 사용자 설정 초기화 |
-| `llmwiki vault add/list/show/remove` | 볼트 등록 및 상태 관리 |
-| `llmwiki doctor` | 설정 파일, 볼트 경로, 필수 문서, 에이전트 설치 진단 |
+| `llmwiki vault add/list/show/remove` | 볼트 등록 및 상태 관리 (`list --json` 지원) |
+| `llmwiki doctor` | 설정 파일, 레지스트리 파싱 오류(줄 번호), 볼트 경로, 필수 문서, 에이전트 설치 진단 |
 | `llmwiki config path/edit` | 설정 위치 확인 및 직접 편집 |
 | `llmwiki [claude\|codex]` | 통합 라우터 시작 |
 | `wiki-add` | 에이전트 안에서 지식을 적절한 볼트에 추가 |

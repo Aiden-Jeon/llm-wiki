@@ -23,7 +23,7 @@ export function normalizeVault(vault) {
   }
 
   const rawPath = validateField('path', vault.path, { required: true });
-  const expandedPath = rawPath === '~' || rawPath.startsWith('~/')
+  const expandedPath = rawPath === '~' || rawPath.startsWith('~/') || rawPath.startsWith('~\\')
     ? path.join(os.homedir(), rawPath.slice(2))
     : rawPath;
   const vaultPath = path.resolve(expandedPath);
@@ -39,17 +39,62 @@ export function normalizeVault(vault) {
   };
 }
 
-export function parseRegistry(content) {
+/**
+ * 레지스트리 표를 행 단위로 파싱한다. 잘못된 행은 버리지 않고 issues로 수집해
+ * `llmwiki doctor`가 파일·줄 번호와 함께 보고할 수 있게 한다.
+ */
+export function parseRegistryFile(content) {
   const vaults = [];
-  for (const line of content.split(/\r?\n/)) {
+  const issues = [];
+  const seen = new Map();
+  const lines = content.split(/\r?\n/);
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const lineNumber = index + 1;
     if (!/^\s*\|/.test(line)) continue;
+
     const cells = line.split('|').slice(1, -1).map((cell) => cell.trim());
-    if (cells.length < 5 || cells[0] === 'name' || /^-+$/.test(cells[0])) continue;
-    vaults.push(normalizeVault({
-      name: cells[0], path: cells[1], kind: cells[2], signals: cells[3], notes: cells[4],
-    }));
+    if (cells[0] === 'name' || /^-+$/.test(cells[0] ?? '')) continue;
+
+    const raw = line.trim();
+    if (cells.length !== 5) {
+      issues.push({ line: lineNumber, raw, message: `열이 정확히 5개(name/path/kind/signals/notes) 필요하지만 ${cells.length}개입니다.` });
+      continue;
+    }
+
+    let vault;
+    try {
+      vault = normalizeVault({
+        name: cells[0], path: cells[1], kind: cells[2], signals: cells[3], notes: cells[4],
+      });
+    } catch (error) {
+      issues.push({ line: lineNumber, raw, message: error.message });
+      continue;
+    }
+
+    if (seen.has(vault.name)) {
+      issues.push({ line: lineNumber, raw, message: `볼트 이름이 중복됩니다: ${vault.name} (${seen.get(vault.name)}행과 충돌).` });
+      continue;
+    }
+    seen.set(vault.name, lineNumber);
+    vaults.push(vault);
   }
-  return vaults;
+
+  return { vaults, issues };
+}
+
+export function parseRegistry(content) {
+  return parseRegistryFile(content).vaults;
+}
+
+export function formatIssues(file, issues) {
+  const details = issues.map((issue) => `  ${issue.line}행: ${issue.message}\n    ${issue.raw}`).join('\n');
+  return [
+    `레지스트리 파일을 읽을 수 없습니다: ${file}`,
+    details,
+    '`llmwiki doctor`로 확인하거나 `llmwiki config edit`로 수정하세요.',
+  ].join('\n');
 }
 
 export function renderRegistry(vaults) {
@@ -60,9 +105,19 @@ export function renderRegistry(vaults) {
   return `${REGISTRY_HEADER}\n${rows.length ? `${rows.join('\n')}\n` : ''}`;
 }
 
-export function readRegistry(file) {
-  if (!fs.existsSync(file)) return [];
-  return parseRegistry(fs.readFileSync(file, 'utf8'));
+export function readRegistryFile(file) {
+  if (!fs.existsSync(file)) return { vaults: [], issues: [] };
+  return parseRegistryFile(fs.readFileSync(file, 'utf8'));
+}
+
+/**
+ * strict(기본값)는 쓰기 경로에서 사용한다. 잘못된 행이 있는 상태로 저장하면
+ * 해당 행이 조용히 삭제되므로, 문제를 먼저 알리고 중단한다.
+ */
+export function readRegistry(file, { strict = true } = {}) {
+  const { vaults, issues } = readRegistryFile(file);
+  if (strict && issues.length) throw new Error(formatIssues(file, issues));
+  return vaults;
 }
 
 export function writeRegistry(file, vaults) {

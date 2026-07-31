@@ -4,7 +4,11 @@ import { spawn, spawnSync } from 'node:child_process';
 import { stdin } from 'node:process';
 import * as p from '@clack/prompts';
 import { getPaths } from './paths.js';
-import { normalizeVault, readRegistry, writeRegistry } from './registry.js';
+import { normalizeVault, readRegistry, readRegistryFile, writeRegistry } from './registry.js';
+
+const VAULT_OPTION_KEYS = ['name', 'path', 'kind', 'signals', 'notes'];
+const VAULT_ADD_USAGE = 'llmwiki vault add --name <name> --path <path> [--kind open|secure] [--signals <신호>] [--notes <메모>]';
+const IS_WINDOWS = process.platform === 'win32';
 
 const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운영합니다.
 
@@ -15,7 +19,7 @@ const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운영합�
   llmwiki codex [agent args]      Codex로 바로 시작
   llmwiki setup                   초기 설정 및 볼트 등록
   llmwiki vault add [options]     볼트 추가/수정
-  llmwiki vault list              등록된 볼트 목록
+  llmwiki vault list [--json]     등록된 볼트 목록
   llmwiki vault show <name>       볼트 상세 정보 및 상태
   llmwiki vault remove <name>     볼트 제거
   llmwiki doctor                  설정·볼트·에이전트 상태 진단
@@ -39,7 +43,7 @@ vault add 옵션:
   LLM_WIKI_CONFIG_HOME 설정 디렉터리 재정의
   LLM_WIKI_DATA_HOME   런타임 데이터 디렉터리 재정의`;
 
-function parseOptions(args) {
+export function parseOptions(args, { allowed, booleans = [], usage } = {}) {
   const options = {};
   const rest = [];
   for (let i = 0; i < args.length; i += 1) {
@@ -49,7 +53,19 @@ function parseOptions(args) {
       break;
     }
     if (arg.startsWith('--')) {
-      const [key, inline] = arg.slice(2).split('=', 2);
+      // 값에 '='가 포함될 수 있으므로 첫 '='만 구분자로 삼는다 (split(limit)은 뒤를 버린다).
+      const body = arg.slice(2);
+      const separator = body.indexOf('=');
+      const key = separator === -1 ? body : body.slice(0, separator);
+      const inline = separator === -1 ? undefined : body.slice(separator + 1);
+      if (!key) throw new Error(`옵션 이름이 비었습니다: ${arg}`);
+      if (allowed && !allowed.includes(key)) {
+        throw new Error(`알 수 없는 옵션: --${key}\n사용 가능한 옵션: ${allowed.map((item) => `--${item}`).join(', ')}${usage ? `\n사용법: ${usage}` : ''}`);
+      }
+      if (booleans.includes(key)) {
+        options[key] = inline === undefined ? true : inline !== 'false';
+        continue;
+      }
       const value = inline ?? args[++i];
       if (value === undefined) throw new Error(`--${key} 옵션 값이 필요합니다.`);
       options[key] = value;
@@ -58,6 +74,30 @@ function parseOptions(args) {
     }
   }
   return { options, rest };
+}
+
+// Windows의 claude.cmd / codex.cmd 같은 셰임(shim)은 shell 없이 실행할 수 없다.
+function toShellCommand(command, args) {
+  const quote = (value) => (/[\s"&|<>^()]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value);
+  return [command, ...args].map(quote).join(' ');
+}
+
+function runSync(command, args, options = {}) {
+  if (IS_WINDOWS) return spawnSync(toShellCommand(command, args), { ...options, shell: true });
+  return spawnSync(command, args, options);
+}
+
+function runAsync(command, args, options = {}) {
+  if (IS_WINDOWS) return spawn(toShellCommand(command, args), { ...options, shell: true });
+  return spawn(command, args, options);
+}
+
+function reportIssues(file, issues) {
+  if (!issues.length) return;
+  const lines = issues.map((issue) => `${issue.line}행: ${issue.message}`);
+  const message = `레지스트리에서 읽지 못한 행 ${issues.length}개 (${file})\n${lines.join('\n')}`;
+  if (stdin.isTTY) p.log.warn(message);
+  else console.error(`[WARN] ${message}`);
 }
 
 function cancelPrompt(value) {
@@ -76,7 +116,13 @@ function inspectVault(vaultPath) {
 }
 
 async function askVault(initial = {}, { edit = false } = {}) {
-  if (!stdin.isTTY) return normalizeVault(initial);
+  if (!stdin.isTTY) {
+    try {
+      return normalizeVault(initial);
+    } catch (error) {
+      throw new Error(`${error.message}\n바로 등록하려면 --name과 --path가 필요합니다.\n사용법: ${VAULT_ADD_USAGE}`);
+    }
+  }
 
   const name = initial.name ?? await p.text({
     message: '볼트 이름',
@@ -153,7 +199,8 @@ function ensureRegistry(paths) {
 
 async function addVault(paths, args, { outro = true, initial = {}, edit = false } = {}) {
   ensureRegistry(paths);
-  const { options } = parseOptions(args);
+  const { options, rest } = parseOptions(args, { allowed: VAULT_OPTION_KEYS, usage: VAULT_ADD_USAGE });
+  if (rest.length) throw new Error(`알 수 없는 인자: ${rest.join(' ')}\n사용법: ${VAULT_ADD_USAGE}`);
   const vault = await askVault({ ...initial, ...options }, { edit });
   if (!vault) return false;
   const vaults = readRegistry(paths.registry);
@@ -214,9 +261,16 @@ async function setup(paths, args) {
   }
 }
 
-function listVaults(paths) {
-  ensureRegistry(paths);
-  const vaults = readRegistry(paths.registry);
+function listVaults(paths, args = []) {
+  const { options, rest } = parseOptions(args, { allowed: ['json'], booleans: ['json'], usage: 'llmwiki vault list [--json]' });
+  if (rest.length) throw new Error(`알 수 없는 인자: ${rest.join(' ')}\n사용법: llmwiki vault list [--json]`);
+  const { vaults, issues } = readRegistryFile(paths.registry);
+
+  if (options.json) {
+    console.log(JSON.stringify({ registry: paths.registry, vaults, issues }, null, 2));
+    return;
+  }
+  reportIssues(paths.registry, issues);
   if (!vaults.length) {
     console.log('등록된 볼트가 없습니다. `llmwiki vault add`로 추가하세요.');
     return;
@@ -247,8 +301,10 @@ async function chooseVault(vaults, message) {
 }
 
 function showVault(paths, name) {
-  if (!name) throw new Error('확인할 볼트 이름이 필요합니다.');
-  const vault = readRegistry(paths.registry).find((item) => item.name === name);
+  if (!name) throw new Error('확인할 볼트 이름이 필요합니다.\n사용법: llmwiki vault show <name>');
+  const { vaults, issues } = readRegistryFile(paths.registry);
+  reportIssues(paths.registry, issues);
+  const vault = vaults.find((item) => item.name === name);
   if (!vault) throw new Error(`등록되지 않은 볼트입니다: ${name}`);
   const status = inspectVault(vault.path);
   const details = [
@@ -267,7 +323,7 @@ function showVault(paths, name) {
 }
 
 async function removeVault(paths, name, { confirm = false } = {}) {
-  if (!name) throw new Error('제거할 볼트 이름이 필요합니다.');
+  if (!name) throw new Error('제거할 볼트 이름이 필요합니다.\n사용법: llmwiki vault remove <name>');
   const vaults = readRegistry(paths.registry);
   const target = vaults.find((vault) => vault.name === name);
   if (!target) throw new Error(`등록되지 않은 볼트입니다: ${name}`);
@@ -282,26 +338,52 @@ async function removeVault(paths, name, { confirm = false } = {}) {
   return true;
 }
 
-function copyEntry(source, destination) {
+const WORKSPACE_DOCS = ['AGENTS.md', 'CLAUDE.md', 'WIKI-CLI.md', 'wikis.example.md'];
+const WORKSPACE_CLAUDE_DIRS = ['commands', 'skills'];
+const WORKSPACE_NOTICE = `# 이 디렉터리는 llmwiki가 관리합니다
+
+라우팅 지침과 볼트 레지스트리를 한곳에 모아 에이전트를 실행하기 위한 작업 공간입니다.
+
+- 매 실행마다 덮어씀: ${WORKSPACE_DOCS.join(', ')}, wikis.local.md,
+  ${WORKSPACE_CLAUDE_DIRS.map((dir) => `.claude/${dir}/`).join(', ')}
+- 그대로 유지됨: 위 목록 이외의 파일 (예: .claude/settings.local.json)
+
+지침을 바꾸려면 이 디렉터리가 아니라 설치된 패키지를 수정하세요.
+볼트 등록 정보는 \`llmwiki config path\`가 알려주는 설정 파일에서 관리합니다.
+`;
+
+function syncDirectory(source, destination) {
+  if (!fs.existsSync(source)) return;
   fs.rmSync(destination, { recursive: true, force: true });
   fs.cpSync(source, destination, { recursive: true });
 }
 
-function prepareWorkspace(paths) {
+export function prepareWorkspace(paths) {
   if (!fs.existsSync(paths.registry)) {
     throw new Error('설정이 없습니다. 먼저 `llmwiki setup`을 실행하세요.');
   }
-  fs.mkdirSync(paths.workspace, { recursive: true });
-  for (const entry of ['AGENTS.md', 'CLAUDE.md', 'WIKI-CLI.md', 'wikis.example.md', '.claude']) {
-    copyEntry(path.join(paths.packageRoot, entry), path.join(paths.workspace, entry));
+  fs.mkdirSync(path.join(paths.workspace, '.claude'), { recursive: true });
+  for (const doc of WORKSPACE_DOCS) {
+    fs.copyFileSync(path.join(paths.packageRoot, doc), path.join(paths.workspace, doc));
   }
-  fs.copyFileSync(paths.registry, path.join(paths.workspace, 'wikis.local.md'));
+  // .claude 전체를 지우면 settings.local.json(사용자 승인 상태)이 매번 사라진다.
+  for (const dir of WORKSPACE_CLAUDE_DIRS) {
+    syncDirectory(path.join(paths.packageRoot, '.claude', dir), path.join(paths.workspace, '.claude', dir));
+  }
+
+  const workspaceRegistry = path.join(paths.workspace, 'wikis.local.md');
+  fs.copyFileSync(paths.registry, workspaceRegistry);
+  try { fs.chmodSync(workspaceRegistry, 0o600); } catch { /* Windows may not support POSIX modes. */ }
+  fs.writeFileSync(path.join(paths.workspace, 'WORKSPACE.md'), WORKSPACE_NOTICE);
   return paths.workspace;
 }
 
 function commandExists(command) {
-  const result = spawnSync(command, ['--version'], { stdio: 'ignore' });
-  return !result.error;
+  const result = runSync(command, ['--version'], { stdio: 'ignore' });
+  if (result.error) return false;
+  // shell 사용 시는 실행 파일이 없어도 error 대신 0이 아닌 상태 코드가 난다.
+  if (IS_WINDOWS) return result.status === 0;
+  return true;
 }
 
 function resolveAgent(requested) {
@@ -324,8 +406,10 @@ function doctor(paths) {
     add('error', '설정 파일', `없음 · llmwiki setup 실행 필요 (${paths.registry})`);
   } else {
     add('success', '설정 파일', paths.registry);
-    const vaults = readRegistry(paths.registry);
-    if (!vaults.length) add('warn', '볼트', '등록된 볼트 없음');
+    // 진단 명령은 파싱 불가능한 행이 있어도 죽지 않고 위치를 알려준다.
+    const { vaults, issues } = readRegistryFile(paths.registry);
+    for (const issue of issues) add('error', `레지스트리 ${issue.line}행`, `${issue.message} · ${issue.raw}`);
+    if (!vaults.length && !issues.length) add('warn', '볼트', '등록된 볼트 없음');
     for (const vault of vaults) {
       const status = inspectVault(vault.path);
       if (!status.exists) add('error', vault.name, `경로 없음 · ${vault.path}`);
@@ -360,7 +444,7 @@ async function start(paths, requestedAgent, agentArgs = []) {
     .filter((vault) => fs.existsSync(vault.path))
     .flatMap((vault) => ['--add-dir', vault.path]);
   console.log(`${agent} 시작 (workspace: ${workspace})`);
-  const child = spawn(agent, [...vaultArgs, ...agentArgs], {
+  const child = runAsync(agent, [...vaultArgs, ...agentArgs], {
     cwd: workspace,
     stdio: 'inherit',
     env: process.env,
@@ -372,11 +456,19 @@ async function start(paths, requestedAgent, agentArgs = []) {
   process.exitCode = code;
 }
 
+// EDITOR는 `code -w`처럼 인자를 포함할 수 있으므로 토큰으로 나눠 사용한다.
+function splitCommand(value) {
+  return (value.match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((token) => token.replace(/^["']|["']$/g, ''));
+}
+
 function editConfig(paths) {
   ensureRegistry(paths);
   const editor = process.env.VISUAL || process.env.EDITOR;
   if (!editor) throw new Error('$EDITOR 또는 $VISUAL 환경 변수를 설정하세요.');
-  const result = spawnSync(`${editor} "${paths.registry.replaceAll('"', '\\"')}"`, { shell: true, stdio: 'inherit' });
+  const [command, ...editorArgs] = splitCommand(editor);
+  if (!command) throw new Error(`$EDITOR 값을 해석할 수 없습니다: ${editor}`);
+  // 셸 문자열을 조립하지 않고 인자로 전달해 경로 속 $()·백틱 해석을 막는다.
+  const result = runSync(command, [...editorArgs, paths.registry], { stdio: 'inherit' });
   if (result.error) throw result.error;
   if (result.status) throw new Error(`편집기가 상태 코드 ${result.status}로 종료되었습니다.`);
 }
@@ -404,7 +496,7 @@ export async function main(args) {
       if (stdin.isTTY) p.intro('llmwiki · 볼트 추가');
       return addVault(paths, vaultArgs);
     }
-    if (action === 'list') return listVaults(paths);
+    if (action === 'list') return listVaults(paths, vaultArgs);
     if (action === 'show') return showVault(paths, vaultArgs[0]);
     if (action === 'remove') return removeVault(paths, vaultArgs[0], { confirm: true });
     throw new Error('사용법: llmwiki vault <add|list|show|remove>');
