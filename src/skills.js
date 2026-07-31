@@ -33,7 +33,15 @@ export function parseSkillFrontmatter(content) {
     if (separator === -1) continue;
     const key = line.slice(0, separator).trim();
     let value = line.slice(separator + 1).trim();
-    if (/^".*"$/.test(value) || /^'.*'$/.test(value)) value = value.slice(1, -1);
+    if (/^".*"$/.test(value)) {
+      try {
+        value = JSON.parse(value);
+      } catch {
+        value = value.slice(1, -1);
+      }
+    } else if (/^'.*'$/.test(value)) {
+      value = value.slice(1, -1);
+    }
     if (key) fields[key] = value;
   }
   return { fields, body: content.slice(match[0].length).trim() };
@@ -72,7 +80,7 @@ export function listTemplates(templatesDir) {
 export function renderSkillTemplate({ name, description = '' }) {
   return `---
 name: ${name}
-description: ${description || `TODO: 이 스킬을 언제 사용하는지, 어떤 발화에서 트리거되는지 한두 문장으로 적는다.`}
+description: ${yamlQuote(description || `TODO: 이 스킬을 언제 사용하는지, 어떤 발화에서 트리거되는지 한두 문장으로 적는다.`)}
 ---
 
 # ${name}
@@ -102,7 +110,7 @@ description: ${description || `TODO: 이 스킬을 언제 사용하는지, 어�
 }
 
 function yamlQuote(value) {
-  return `"${String(value).replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+  return JSON.stringify(String(value));
 }
 
 /** Claude Code 슬래시 명령은 스킬마다 자동 생성한다 (Codex는 SKILLS.md 카탈로그를 본다). */
@@ -166,19 +174,28 @@ export function createSkill(skillsDir, { name, description = '', from, force = f
   const existed = fs.existsSync(dir);
   if (existed && !force) throw new Error(`이미 존재하는 스킬입니다: ${path.basename(dir)} (덮어쓰려면 --force)`);
 
-  fs.mkdirSync(dir, { recursive: true });
+  let source;
+  let sourceIsDirectory = false;
+  if (from) {
+    source = path.resolve(from);
+    if (!fs.existsSync(source)) throw new Error(`가져올 경로를 찾을 수 없습니다: ${source}`);
+    sourceIsDirectory = fs.statSync(source).isDirectory();
+    if (sourceIsDirectory && !fs.existsSync(path.join(source, SKILL_FILE))) {
+      throw new Error(`${source}에 ${SKILL_FILE}이 없습니다.`);
+    }
+  }
+
   if (!from) {
+    fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, SKILL_FILE), renderSkillTemplate({ name: path.basename(dir), description }));
     return { dir, existed };
   }
 
-  const source = path.resolve(from);
-  if (!fs.existsSync(source)) throw new Error(`가져올 경로를 찾을 수 없습니다: ${source}`);
-  if (fs.statSync(source).isDirectory()) {
-    if (!fs.existsSync(path.join(source, SKILL_FILE))) throw new Error(`${source}에 ${SKILL_FILE}이 없습니다.`);
+  if (sourceIsDirectory) {
     fs.rmSync(dir, { recursive: true, force: true });
     fs.cpSync(source, dir, { recursive: true });
   } else {
+    fs.mkdirSync(dir, { recursive: true });
     fs.copyFileSync(source, path.join(dir, SKILL_FILE));
   }
   alignSkillName(path.join(dir, SKILL_FILE), path.basename(dir));

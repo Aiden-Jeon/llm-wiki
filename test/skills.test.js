@@ -45,6 +45,15 @@ test('createSkill scaffolds a skill and refuses to overwrite without --force', (
   assert.equal(createSkill(skillsDir, { name: 'weekly-retro', force: true }).existed, true);
 });
 
+test('createSkill quotes YAML-significant descriptions', () => {
+  const skillsDir = tmpDir();
+  const description = 'trigger: weekly\nUse "notes" \\ safely';
+  const { dir } = createSkill(skillsDir, { name: 'yaml-safe', description });
+
+  assert.equal(readSkill(dir).description, description);
+  assert.match(fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8'), /description: "trigger: weekly\\nUse \\"notes\\" \\\\ safely"/);
+});
+
 test('createSkill imports a directory and aligns frontmatter name', () => {
   const source = path.join(tmpDir(), 'origin');
   fs.mkdirSync(source, { recursive: true });
@@ -57,6 +66,17 @@ test('createSkill imports a directory and aligns frontmatter name', () => {
   assert.deepEqual(skill.issues, []);
   assert.equal(skill.description, '\uac00\uc838\uc628 \uc2a4\ud0ac.');
   assert.ok(fs.existsSync(path.join(dir, 'reference.md')));
+});
+
+test('createSkill validates import sources before creating the destination', () => {
+  const skillsDir = tmpDir();
+  const missing = path.join(tmpDir(), 'missing');
+  assert.throws(() => createSkill(skillsDir, { name: 'missing-source', from: missing }), /찾을 수 없습니다/);
+  assert.equal(fs.existsSync(path.join(skillsDir, 'missing-source')), false);
+
+  const invalid = tmpDir();
+  assert.throws(() => createSkill(skillsDir, { name: 'invalid-source', from: invalid }), /SKILL\.md이 없습니다/);
+  assert.equal(fs.existsSync(path.join(skillsDir, 'invalid-source')), false);
 });
 
 test('readSkill reports missing description and name mismatch', () => {
