@@ -100,7 +100,7 @@ llmwiki start codex -- --model gpt-5
 
 CLI는 사용자 데이터 디렉터리에 관리형 실행 워크스페이스를 준비하고 레지스트리를 동기화한 뒤 에이전트를 실행합니다. 따라서 현재 디렉터리와 관계없이 동일한 라우팅 지침과 설정으로 시작됩니다.
 
-워크스페이스에서 매 실행마다 갱신되는 항목은 라우팅 지침 문서(`AGENTS.md`, `CLAUDE.md`, `WIKI-CLI.md`, `wikis.example.md`), `wikis.local.md`, `.claude/commands/`, `.claude/skills/`입니다. 그 이외의 파일은 그대로 유지되므로 `.claude/settings.local.json`에 쌓인 Claude Code 권한 승인을 매번 다시 하지 않아도 됩니다. 자세한 설명은 워크스페이스의 `WORKSPACE.md`에 있습니다.
+워크스페이스에서 매 실행마다 갱신되는 항목은 라우팅 지침 문서(`AGENTS.md`, `CLAUDE.md`, `WIKI-CLI.md`, `wikis.example.md`), `wikis.local.md`, 생성된 스킬 카탈로그 `SKILLS.md`, `.claude/commands/`, `.claude/skills/`입니다. 그 이외의 파일은 그대로 유지되므로 `.claude/settings.local.json`에 쌓인 Claude Code 권한 승인을 매번 다시 하지 않아도 됩니다. 자세한 설명은 워크스페이스의 `WORKSPACE.md`에 있습니다.
 
 ## 명령
 
@@ -110,6 +110,9 @@ CLI는 사용자 데이터 디렉터리에 관리형 실행 워크스페이스�
 |------|------|
 | `llmwiki setup` | 사용자 설정 초기화 |
 | `llmwiki vault add/list/show/remove` | 볼트 등록 및 상태 관리 (`list --json` 지원) |
+| `llmwiki skill add/list/show/edit/remove` | 커스텀 스킬 관리 (`list --json` 지원) |
+| `llmwiki skill templates` | 내장 스킬 템플릿 목록 |
+| `llmwiki skill path [name]` | 스킬 원본 경로 출력 |
 | `llmwiki doctor` | 설정 파일, 레지스트리 파싱 오류(줄 번호), 볼트 경로, 필수 문서, 에이전트 설치 진단 |
 | `llmwiki config path/edit` | 설정 위치 확인 및 직접 편집 |
 | `llmwiki [claude\|codex]` | 통합 라우터 시작 |
@@ -123,7 +126,7 @@ CLI는 사용자 데이터 디렉터리에 관리형 실행 워크스페이스�
 | wiki-add | `/wiki-add <입력>` | `wiki-add <입력>` | 지식을 적절한 볼트에 추가(ingest) |
 | wiki-search | `/wiki-search <질의>` | `wiki-search <질의>` | 모든 볼트를 가로질러 검색 |
 | wiki-use | `/wiki-use <질문>` | `wiki-use <질문>` | 기존 지식으로 답하거나 새 분석 생성 |
-| linkedin-draft | `/linkedin-draft` | `linkedin-draft` | 커리어 자료 기반 LinkedIn 초안 생성 |
+| 커스텀 스킬 | `/<skill>` | `<skill>` | `llmwiki skill`로 등록한 사용자 정의 작업 |
 
 입력값으로 URL, 로컬 파일 경로, Notion URL, 자유 텍스트를 모두 넘길 수 있습니다.
 
@@ -140,6 +143,39 @@ llmwiki claude
 호출하면 에이전트가 `wikis.local.md`의 볼트 목록과 `signals`로 대상 볼트를 결정하고, 해당 볼트로 `cd`한 뒤 그 볼트 `CLAUDE.md`의 워크플로우를 실행합니다. 대상이 모호하면 사용자에게 확인하며, `kind: secure` 볼트 쓰기는 확인 게이트와 익명화 절차를 거칩니다.
 
 라우팅·보안 경계 규칙은 [`WIKI-CLI.md`](WIKI-CLI.md)를 참고하세요.
+
+## 커스텀 스킬
+
+LinkedIn 프로필 초안처럼 사용자별로 다른 작업은 라우터에 내장하지 않고 직접 스킬로 등록해 사용합니다. 스킬은 하나의 `SKILL.md` 마크다운 파일이며, 등록하면 Claude Code 슬래시 명령과 Codex 태스크로 동시에 노출됩니다.
+
+```bash
+# 내장 템플릿에서 시작 (예: LinkedIn 초안 스킬)
+llmwiki skill templates
+llmwiki skill add linkedin-draft --template linkedin-draft
+
+# 새 스킬을 만들고 $EDITOR로 편집
+llmwiki skill add weekly-retro --description "주간 회고 생성. '주간 회고', '이번 주 정리' 요청에 사용"
+
+# 기존 스킬 파일이나 디렉터리 가져오기
+llmwiki skill add paper-review --from ~/skills/paper-review
+
+llmwiki skill list
+llmwiki skill show linkedin-draft
+llmwiki skill edit linkedin-draft
+llmwiki skill remove linkedin-draft
+```
+
+스킬 원본은 설정 디렉터리의 `skills/<name>/SKILL.md`에 보관되며(`llmwiki skill path`), 다음 실행 시 워크스페이스로 동기화됩니다. 이때 다음 항목이 자동 생성됩니다.
+
+| 생성 대상 | 용도 |
+|-----------|------|
+| `.claude/skills/<name>/` | 스킬 정본 사본 (Claude Code skill) |
+| `.claude/commands/<name>.md` | Claude Code 슬래시 명령 (`/<name>`) |
+| `SKILLS.md` | Codex가 읽는 스킬 카탈로그 |
+
+이전 버전의 `linkedin-draft` 명령은 내장 명령에서 빠지고 내장 템플릿으로 이동했습니다. 계속 쓰려면 `llmwiki skill add linkedin-draft --template linkedin-draft`로 한 번 등록하세요.
+
+`SKILL.md` 프론트매터에는 `name`과 `description`이 필요합니다. `description`은 에이전트가 "언제 이 스킬을 쓸지" 판단하는 기준이므로 트리거가 되는 발화 예시를 포함하는 것이 좋습니다. 누락된 항목은 `llmwiki doctor`가 보고합니다. 스킬 이름은 내장 명령(`wiki-add`, `wiki-search`, `wiki-use`)과 중복할 수 없습니다.
 
 ## 설계 원칙
 

@@ -11,7 +11,7 @@
     "bin/",
     "src/",
     ".claude/commands/",
-    ".claude/skills/",
+    "templates/",
     "AGENTS.md",
     "CLAUDE.md",
     "WIKI-CLI.md",
