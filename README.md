@@ -8,17 +8,12 @@
 
 Node.js 18 이상이 필요합니다. macOS/Linux에서 검증했으며, Windows에서는 `.cmd` 셰임을 거친 에이전트 실행을 지원합니다.
 
-### npm 패키지로 설치
+### GitHub 저장소에서 설치
+
+작업용 clone 없이 Git 저장소 URL로 바로 전역 설치할 수 있습니다.
 
 ```bash
-npm install -g llm-wiki-cli
-llmwiki setup
-```
-
-npm에 배포하기 전에는 Git 저장소 URL로도 설치할 수 있습니다. 이 방식도 작업용 clone은 필요하지 않습니다.
-
-```bash
-npm install -g github:<owner>/<repository>
+npm install -g github:Aiden-Jeon/llm-wiki
 llmwiki setup
 ```
 
@@ -109,6 +104,8 @@ CLI는 사용자 데이터 디렉터리에 관리형 실행 워크스페이스�
 
 ## 명령
 
+### 셸 명령 (터미널에서 실행)
+
 | 명령 | 설명 |
 |------|------|
 | `llmwiki setup` | 사용자 설정 초기화 |
@@ -116,10 +113,31 @@ CLI는 사용자 데이터 디렉터리에 관리형 실행 워크스페이스�
 | `llmwiki doctor` | 설정 파일, 레지스트리 파싱 오류(줄 번호), 볼트 경로, 필수 문서, 에이전트 설치 진단 |
 | `llmwiki config path/edit` | 설정 위치 확인 및 직접 편집 |
 | `llmwiki [claude\|codex]` | 통합 라우터 시작 |
-| `wiki-add` | 에이전트 안에서 지식을 적절한 볼트에 추가 |
-| `wiki-search` | 모든 볼트를 가로질러 검색 |
-| `wiki-use` | 기존 지식으로 답하거나 새 분석 생성 |
-| `linkedin-draft` | 커리어 자료 기반 LinkedIn 초안 생성 |
+
+### 에이전트 내부 명령 (라우터 세션 안에서 실행)
+
+터미널에서 직접 실행하는 명령이 아닙니다. `llmwiki`로 에이전트를 띄운 뒤 Claude Code에서는 슬래시 커맨드로, Codex에서는 태스크 이름을 그대로 말해서 호출합니다.
+
+| 명령 | Claude Code | Codex | 설명 |
+|------|-------------|-------|------|
+| wiki-add | `/wiki-add <입력>` | `wiki-add <입력>` | 지식을 적절한 볼트에 추가(ingest) |
+| wiki-search | `/wiki-search <질의>` | `wiki-search <질의>` | 모든 볼트를 가로질러 검색 |
+| wiki-use | `/wiki-use <질문>` | `wiki-use <질문>` | 기존 지식으로 답하거나 새 분석 생성 |
+| linkedin-draft | `/linkedin-draft` | `linkedin-draft` | 커리어 자료 기반 LinkedIn 초안 생성 |
+
+입력값으로 URL, 로컬 파일 경로, Notion URL, 자유 텍스트를 모두 넘길 수 있습니다.
+
+```bash
+llmwiki claude
+```
+
+```
+/wiki-add https://arxiv.org/abs/2501.12345
+/wiki-add ~/Downloads/meeting-notes.md
+/wiki-search LLM 서빙 비용 최적화
+```
+
+호출하면 에이전트가 `wikis.local.md`의 볼트 목록과 `signals`로 대상 볼트를 결정하고, 해당 볼트로 `cd`한 뒤 그 볼트 `CLAUDE.md`의 워크플로우를 실행합니다. 대상이 모호하면 사용자에게 확인하며, `kind: secure` 볼트 쓰기는 확인 게이트와 익명화 절차를 거칩니다.
 
 라우팅·보안 경계 규칙은 [`WIKI-CLI.md`](WIKI-CLI.md)를 참고하세요.
 
@@ -127,22 +145,19 @@ CLI는 사용자 데이터 디렉터리에 관리형 실행 워크스페이스�
 
 - **볼트가 정본**: 실제 ingest/query/lint/reflect/publish 흐름은 각 볼트의 `CLAUDE.md`가 정의합니다.
 - **얇은 라우터**: 이 패키지는 사용자 요청을 볼트로 라우팅하고 해당 볼트의 규칙에 위임합니다.
-- **설정과 패키지 분리**: npm 업데이트로 사용자 레지스트리가 삭제되거나 덮어써지지 않습니다.
+- **설정과 패키지 분리**: 패키지를 재설치·업데이트해도 사용자 레지스트리가 삭제되거나 덮어써지지 않습니다.
 - **보안 경계 유지**: `secure` 볼트 쓰기는 확인과 익명화 절차를 거칩니다.
 
 ## 볼트 요구사항
 
 각 볼트는 최소한 자체 `CLAUDE.md`(위키 스키마와 워크플로우) 및 `index.md`를 가지는 것을 권장합니다. Codex 전용 지침이 필요하면 `AGENTS.md`를 추가할 수 있습니다. `secure` 볼트는 보안 원칙을 명시해야 합니다.
 
-## 개발 및 배포
+## 개발
 
 ```bash
 npm test
 npm pack --dry-run
-npm publish
 ```
-
-패키지 이름이나 scope를 바꾸려면 `package.json`의 `name`을 수정한 뒤 배포합니다.
 
 ## 라이선스
 
