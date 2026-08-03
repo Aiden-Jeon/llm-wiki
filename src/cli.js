@@ -46,16 +46,19 @@ import {
   hasConnection,
   normalizeConnectionName,
   legacyConnectionName,
+  pruneSecretsGitignore,
 } from './secrets.js';
-import { pushSync, deleteRemoteDatabaseMapping } from './sync.js';
+import { pushSync, deleteRemoteDatabaseMapping, REMOTE_MAP_FILE } from './sync.js';
 import { pullInbox } from './inbox.js';
 import {
   gitAddCommit,
   gitClone,
+  gitCommitFile,
   gitPullRebase,
   gitPush,
   gitRemoteUrl,
   gitSetRemote,
+  fileHasChanges,
   hasUpstream,
   isGitAvailable,
   isGitRepo,
@@ -79,6 +82,7 @@ const CONFIG_EXPORT_USAGE = 'llmwiki config export [--output <file>]';
 const CONFIG_IMPORT_USAGE = 'llmwiki config import <file> [--vaults-dir <dir>] [--force]';
 const INBOX_USAGE = 'llmwiki inbox pull [vault] [--dry-run] [--limit <n>]';
 const SKILL_ADD_USAGE = 'llmwiki skill add <name> [--description <설명>] [--from <경로>] [--template <name>] [--force] [--no-edit]';
+const RESET_USAGE = 'llmwiki reset [--purge-vaults] [--force]';
 const IS_WINDOWS = process.platform === 'win32';
 
 const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운영합니다.
@@ -117,6 +121,7 @@ const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운영합�
   llmwiki skill templates         내장 스킬 템플릿 목록
   llmwiki skill path [name]       스킬 디렉터리 경로 출력
   llmwiki doctor                  설정·볼트·스킬·에이전트 상태 진단
+  llmwiki reset [--purge-vaults] [--force]   모든 사용자 설정을 지워 setup 이전 상태로 초기화
   llmwiki config path             설정 파일 경로 출력
   llmwiki config edit             $EDITOR로 설정 편집
   llmwiki config export [--output <file>]        설정(볼트·스킬)을 JSON 번들로 내보내기
@@ -1975,6 +1980,30 @@ async function publish(paths, args) {
     const note = `뷰 생성은 건너뜀 — ${summary.viewsError} (\`llmwiki publish view ${vault.name}\`로 재시도)`;
     if (stdin.isTTY) p.log.warn(note); else console.error(note);
   }
+
+  // 발행 dedup 상태(_meta/remote-map.json)는 git으로 볼트를 따라 이동해 머신·클론 간에
+  // 공유돼야 중복 발행을 막는다. 커밋되지 않으면 클론·경로 이동 때 유실돼 전체가 재발행된다.
+  // git 백엔드에서 이 파일에 미커밋 변경이 있으면 커밋할지 묻는다(push는 `vault sync`가 담당).
+  if (!dryRun && vault.backend === 'git' && isGitRepo(vault.path) && fileHasChanges(vault.path, REMOTE_MAP_FILE)) {
+    let commit = stdin.isTTY;
+    if (stdin.isTTY) {
+      const answer = await p.confirm({
+        message: `발행 상태(${REMOTE_MAP_FILE})가 바뀌었습니다. 커밋할까요? (커밋하지 않으면 다음 발행에서 중복될 수 있습니다)`,
+        initialValue: true,
+      });
+      commit = !cancelPrompt(answer) && answer;
+    }
+    if (commit) {
+      const result = gitCommitFile(vault.path, REMOTE_MAP_FILE, `chore: llmwiki publish 상태 갱신 (${vault.name})`);
+      const note = result.committed
+        ? `발행 상태 커밋 완료 · ${REMOTE_MAP_FILE} (push는 \`llmwiki vault sync ${vault.name}\`)`
+        : `발행 상태 변경 없음 (커밋 생략)`;
+      if (stdin.isTTY) p.log.success(note); else console.log(note);
+    } else {
+      const note = `발행 상태(${REMOTE_MAP_FILE})가 커밋되지 않았습니다. 유실되면 중복 발행되니 \`llmwiki vault sync ${vault.name}\`로 커밋·push하세요.`;
+      if (stdin.isTTY) p.log.warn(note); else console.error(note);
+    }
+  }
   return true;
 }
 
@@ -2120,6 +2149,87 @@ async function importConfig(paths, args) {
   return true;
 }
 
+/**
+ * `llmwiki reset [--purge-vaults] [--force]`: 모든 사용자 설정을 지워 setup 이전 상태로 되돌린다.
+ * 레지스트리·토큰·발행 설정·커스텀 스킬·워크스페이스를 삭제한다. 등록된 볼트의 실제 파일은
+ * 기본적으로 보존하고(레지스트리 엔트리만 사라짐), --purge-vaults면 볼트 디렉터리까지 지운다.
+ * configDir/vaultsHome 자체는 지우지 않고 이름을 지정한 파일·개별 볼트 경로만 삭제한다.
+ * (agent reset과 무관 — 이건 최상위 명령이다.)
+ */
+export async function resetConfig(paths, args) {
+  const { options, rest } = parseOptions(args, {
+    allowed: ['purge-vaults', 'force'],
+    booleans: ['purge-vaults', 'force'],
+    usage: RESET_USAGE,
+  });
+  if (rest.length) throw new Error(`알 수 없는 인자: ${rest.join(' ')}\n사용법: ${RESET_USAGE}`);
+  const tty = Boolean(stdin.isTTY);
+  const purgeVaults = options['purge-vaults'] === true;
+
+  // 삭제 대상 수집. config 파일/디렉터리는 존재하는 것만, 볼트 경로는 purge일 때만.
+  // 레지스트리는 깨져 있어도 reset은 진행돼야 하므로 issues는 무시한다(파일이 없으면 빈 목록).
+  // .gitignore는 사용자 규칙이 섞여 있을 수 있어 통째로 지우지 않고 아래에서 규칙만 발라낸다.
+  const configTargets = [
+    { path: paths.registry, recursive: false, label: '볼트 레지스트리' },
+    { path: paths.secrets, recursive: false, label: '연결 토큰(secrets.json)' },
+    { path: paths.publish, recursive: false, label: '발행 설정(publish.json)' },
+    { path: paths.skillsDir, recursive: true, label: '커스텀 스킬' },
+    { path: paths.workspace, recursive: true, label: '실행 워크스페이스' },
+  ].filter((target) => fs.existsSync(target.path));
+
+  const vaultTargets = purgeVaults
+    ? readRegistryFile(paths.registry).vaults
+      .filter((vault) => fs.existsSync(vault.path))
+      .map((vault) => ({
+        path: vault.path,
+        recursive: true,
+        label: `볼트 파일 · ${vault.name}${vault.backend === 'git' ? ' (git)' : ''}`,
+        git: vault.backend === 'git',
+      }))
+    : [];
+
+  const targets = [...configTargets, ...vaultTargets];
+  // .gitignore에 우리 규칙(secrets.json)이 있으면 정리 대상이다(파일 삭제와 별개로 카운트).
+  const gitignoreFile = path.join(paths.configDir, '.gitignore');
+  const prunesGitignore = fs.existsSync(gitignoreFile)
+    && fs.readFileSync(gitignoreFile, 'utf8').split(/\r?\n/).some((row) => row.trim() === 'secrets.json');
+
+  if (!targets.length && !prunesGitignore) {
+    const message = '이미 초기 상태입니다 — 지울 설정이 없습니다.';
+    if (tty) p.log.info(message); else console.log(message);
+    return true;
+  }
+
+  // 확인 게이트. TTY는 대상 요약 박스 + 확인, 비-TTY는 --force가 없으면 거부한다.
+  const hasGitVault = vaultTargets.some((target) => target.git);
+  if (tty) {
+    const summaryLines = targets.map((target) => `${target.label} · ${target.path}`);
+    if (purgeVaults) {
+      summaryLines.push('', '⚠ --purge-vaults: 등록된 볼트의 실제 파일이 영구 삭제됩니다.');
+      if (hasGitVault) summaryLines.push('⚠ git 볼트가 포함됩니다 — push하지 않은 커밋은 복구할 수 없습니다.');
+    }
+    console.log(renderNote(summaryLines.join('\n'), '초기화 대상'));
+    const accepted = await p.confirm({ message: '이 항목을 모두 삭제할까요? (되돌릴 수 없습니다)', initialValue: false });
+    if (cancelPrompt(accepted) || !accepted) {
+      if (accepted === false) p.cancel('초기화하지 않았습니다.');
+      return false;
+    }
+  } else if (options.force !== true) {
+    throw new Error(`비대화형 환경에서 설정을 초기화하려면 --force가 필요합니다.\n사용법: ${RESET_USAGE}`);
+  }
+
+  for (const target of targets) {
+    fs.rmSync(target.path, { recursive: target.recursive, force: true });
+  }
+  // secrets.json 무시 규칙만 제거한다(사용자가 넣은 다른 규칙은 보존, 남는 게 없으면 파일 삭제).
+  const prunedGitignore = pruneSecretsGitignore(paths.configDir);
+
+  const removedCount = targets.length + (prunedGitignore ? 1 : 0);
+  const summary = `설정 초기화 완료 · ${removedCount}개 항목 정리${purgeVaults ? ' (볼트 파일 포함)' : ''}\n\`llmwiki setup\`으로 다시 설정하세요.`;
+  if (tty) p.log.success(summary); else console.log(summary);
+  return true;
+}
+
 export async function main(args) {
   const paths = getPaths();
   const [command = 'start', ...rest] = args;
@@ -2131,6 +2241,10 @@ export async function main(args) {
   }
   if (command === 'setup' || command === 'init') return setup(paths, rest);
   if (command === 'doctor') return doctor(paths);
+  if (command === 'reset') {
+    if (stdin.isTTY) p.intro('llmwiki · 설정 초기화');
+    return resetConfig(paths, rest);
+  }
   if (command === 'claude' || command === 'codex') return start(paths, command, rest);
   if (command === 'start') {
     const agent = ['claude', 'codex'].includes(rest[0]) ? rest.shift() : undefined;

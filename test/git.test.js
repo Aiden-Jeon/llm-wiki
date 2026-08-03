@@ -115,6 +115,42 @@ test('first sync against an empty remote: no upstream, gitPush sets it and pushe
   assert.equal(fs.readFileSync(path.join(b, 'first.md'), 'utf8'), 'first commit\n');
 });
 
+test('gitCommitFile commits only the named file, leaving other changes staged-free', { skip: !HAS_GIT }, () => {
+  const { remote } = seedRemote();
+  const dir = tmp('commitfile');
+  fs.rmSync(dir, { recursive: true, force: true });
+  gitClone(remote, dir);
+  run(['-C', dir, 'config', 'user.email', 'test@example.com']);
+  run(['-C', dir, 'config', 'user.name', 'Test']);
+
+  // 두 파일을 만든다: 하나만 커밋 대상.
+  fs.mkdirSync(path.join(dir, '_meta'), { recursive: true });
+  const mapRel = path.join('_meta', 'remote-map.json');
+  fs.writeFileSync(path.join(dir, mapRel), '{"version":2}\n');
+  fs.writeFileSync(path.join(dir, 'other.md'), 'untracked other\n');
+
+  assert.equal(gitmod.fileHasChanges(dir, mapRel), true);
+  const result = gitmod.gitCommitFile(dir, mapRel, 'commit map only');
+  assert.equal(result.committed, true);
+
+  // remote-map만 커밋됐고 other.md는 여전히 untracked로 남는다.
+  assert.equal(gitmod.fileHasChanges(dir, mapRel), false);
+  const status = run(['-C', dir, 'status', '--porcelain']);
+  assert.match(status, /other\.md/);
+  assert.doesNotMatch(status, /remote-map\.json/);
+});
+
+test('gitCommitFile / fileHasChanges skip when the file is unchanged', { skip: !HAS_GIT }, () => {
+  const { remote } = seedRemote();
+  const dir = tmp('commitfile-noop');
+  fs.rmSync(dir, { recursive: true, force: true });
+  gitClone(remote, dir);
+  run(['-C', dir, 'config', 'user.email', 'test@example.com']);
+  run(['-C', dir, 'config', 'user.name', 'Test']);
+  assert.equal(gitmod.fileHasChanges(dir, 'index.md'), false);
+  assert.equal(gitmod.gitCommitFile(dir, 'index.md', 'noop').committed, false);
+});
+
 test('gitSetRemote adds then updates the origin url', { skip: !HAS_GIT }, () => {
   const dir = tmp('setremote');
   run(['init', dir]);
