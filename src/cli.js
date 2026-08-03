@@ -34,6 +34,7 @@ import {
   writeRawNote,
 } from './capture.js';
 import { loadRemoteConfig } from './remote.js';
+import { renderNote } from './note.js';
 import { getProvider } from './providers/index.js';
 import { resolveRemoteToken } from './providers/token.js';
 import { pushSync } from './sync.js';
@@ -320,14 +321,14 @@ async function askVault(paths, initial = {}, { edit = false } = {}) {
   if (cancelPrompt(notes)) return null;
 
   const vault = normalizeVault({ name, path: vaultPath, kind, backend, origin, signals, notes });
-  p.note([
+  console.log(renderNote([
     `이름    ${vault.name}`,
     `경로    ${vault.path}`,
     `종류    ${vault.kind}`,
     `백엔드  ${vault.backend}${vault.origin ? ` · ${vault.origin}` : ''}`,
     `신호    ${vault.signals || '없음'}`,
     `메모    ${vault.notes || '없음'}`,
-  ].join('\n'), '등록 내용');
+  ].join('\n'), '등록 내용'));
 
   const confirmed = await p.confirm({ message: '이 내용으로 저장할까요?', initialValue: true });
   if (cancelPrompt(confirmed) || !confirmed) {
@@ -486,15 +487,18 @@ function listVaults(paths, args = []) {
     p.intro(`llmwiki · 볼트 ${vaults.length}개`);
     for (const vault of vaults) {
       const status = inspectVault(vault.path);
-      p.note([
-        `${vault.kind} · ${status.exists ? '경로 정상' : '경로 없음'}`,
+      const backend = vault.backend === 'git' ? `git · ${vault.origin}` : vault.backend;
+      // p.note는 박스 폭을 문자열 길이로 계산해 CJK(2칸)·긴 URL에서 오른쪽 테두리가
+      // 틀어진다. displayWidth 기반의 renderNote로 같은 박스를 정렬 맞춰 그린다.
+      console.log(renderNote([
+        `${vault.kind} · ${backend} · ${status.exists ? '경로 정상' : '경로 없음'}`,
         vault.path,
         `신호: ${vault.signals || '없음'}`,
-      ].join('\n'), vault.name);
+      ].join('\n'), vault.name));
     }
     p.outro('상세 정보: llmwiki vault show <name>');
   } else {
-    console.table(vaults.map(({ name, path: vaultPath, kind, signals }) => ({ name, kind, path: vaultPath, signals })));
+    console.table(vaults.map(({ name, path: vaultPath, kind, backend, origin, signals }) => ({ name, kind, backend, origin, path: vaultPath, signals })));
   }
 }
 
@@ -526,7 +530,7 @@ function showVault(paths, name) {
     `AGENTS.md  ${status.agents ? '있음' : '없음'}`,
     `index.md   ${status.index ? '있음' : '없음'}`,
   ].join('\n');
-  if (stdin.isTTY) p.note(details, '볼트 상세');
+  if (stdin.isTTY) console.log(renderNote(details, '볼트 상세'));
   else console.log(details);
 }
 
@@ -704,7 +708,7 @@ function listAgents(paths, args = []) {
     return;
   }
   const lines = rows.map((row) => `${row.agent} → ${row.command}${row.default ? ' (기본값)' : ''} · add-dir ${row.addDir ? 'yes' : 'no'} · ${row.installed ? '실행 가능' : '명령 없음'}`);
-  if (stdin.isTTY) p.note(lines.join('\n'), 'llmwiki · 에이전트 실행 명령');
+  if (stdin.isTTY) console.log(renderNote(lines.join('\n'), 'llmwiki · 에이전트 실행 명령'));
   else for (const line of lines) console.log(line);
 }
 
@@ -787,11 +791,11 @@ function listSkillsCommand(paths, args = []) {
   if (stdin.isTTY) {
     p.intro(`llmwiki · 커스텀 스킬 ${skills.length}개`);
     for (const skill of skills) {
-      p.note([
+      console.log(renderNote([
         skill.description || '설명 없음',
         skill.dir,
         ...skill.issues.map((issue) => `⚠ ${issue}`),
-      ].join('\n'), skill.name);
+      ].join('\n'), skill.name));
     }
     p.outro('호출: Claude `/<name>` · Codex `<name>`');
   } else {
@@ -894,7 +898,7 @@ function showSkill(paths, name) {
     `호출   Claude /${skill.name} · Codex ${skill.name}`,
     `상태   ${skill.issues.length ? skill.issues.join(' / ') : '정상'}`,
   ].join('\n');
-  if (stdin.isTTY) p.note(details, '스킬 상세');
+  if (stdin.isTTY) console.log(renderNote(details, '스킬 상세'));
   else console.log(details);
 }
 
