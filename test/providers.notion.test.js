@@ -1,14 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  applySchema,
   chunkBlocks,
+  createDatabase,
   createRemotePage,
+  diffPublishSchema,
   extractDatabaseTitle,
   extractNotionTitle,
   fetchInboxNote,
+  findTitleProperty,
   frontmatterToProperties,
+  inspectDatabase,
   itemId,
+  listDatabases,
   listInboxItems,
+  listPages,
   markdownToBlocks,
   parseRichText,
   updateRemotePage,
@@ -175,4 +182,78 @@ test('verifyDatabase resolves the title, rejects missing id, and reports not-fou
     () => verifyDatabase({ databases: { retrieve: async () => { throw { code: 'object_not_found', message: 'Could not find database.' }; } } }, { databaseId: 'bad' }),
     /데이터베이스\(bad\) 확인 실패.*object_not_found/,
   );
+});
+
+test('findTitleProperty finds the title property by type, defaulting to Name', () => {
+  assert.equal(findTitleProperty({ properties: { 제목: { type: 'title' }, Tags: { type: 'multi_select' } } }), '제목');
+  assert.equal(findTitleProperty({ properties: { Tags: { type: 'multi_select' } } }), 'Name');
+});
+
+test('diffPublishSchema reports a full match as ok with no missing/conflicts', () => {
+  const db = { properties: {
+    Name: { type: 'title' }, Type: { type: 'select' }, Status: { type: 'select' },
+    Tags: { type: 'multi_select' }, Summary: { type: 'rich_text' }, Confidence: { type: 'select' },
+    Created: { type: 'date' }, Updated: { type: 'date' }, 'Source URL': { type: 'url' },
+  } };
+  const diff = diffPublishSchema(db);
+  assert.equal(diff.ok, true);
+  assert.deepEqual(diff.missing, []);
+  assert.deepEqual(diff.conflicts, []);
+  assert.equal(diff.titleProperty, 'Name');
+});
+
+test('diffPublishSchema separates missing columns from type conflicts (title name is flexible)', () => {
+  const db = { properties: {
+    제목: { type: 'title' },        // 이름 달라도 title이면 충족
+    Status: { type: 'rich_text' },  // 타입 충돌
+    Tags: { type: 'multi_select' },
+  } };
+  const diff = diffPublishSchema(db);
+  assert.equal(diff.ok, false);
+  assert.equal(diff.titleProperty, '제목');
+  assert.deepEqual(diff.conflicts, [{ name: 'Status', expected: 'select', actual: 'rich_text' }]);
+  // Type/Summary/Confidence/Created/Updated/Source URL 누락 (Status는 충돌로 분류돼 missing 아님)
+  assert.deepEqual(diff.missing, ['Type', 'Summary', 'Confidence', 'Created', 'Updated', 'Source URL']);
+});
+
+test('listDatabases and listPages paginate the search API by object type', async () => {
+  const client = {
+    search: async ({ filter, start_cursor }) => {
+      if (filter.value === 'database') {
+        if (!start_cursor) return { results: [{ id: 'd1', title: [{ plain_text: 'Wiki' }] }], has_more: true, next_cursor: 'c2' };
+        return { results: [{ id: 'd2', title: [] }], has_more: false };
+      }
+      return { results: [{ id: 'pg1', properties: { Name: { type: 'title', title: [{ plain_text: 'Home' }] } } }], has_more: false };
+    },
+  };
+  assert.deepEqual(await listDatabases(client, {}), [{ id: 'd1', title: 'Wiki' }, { id: 'd2', title: '(제목 없음)' }]);
+  assert.deepEqual(await listPages(client, {}), [{ id: 'pg1', title: 'Home' }]);
+});
+
+test('createDatabase creates the full schema under a parent page and returns the title property', async () => {
+  let created;
+  const client = { databases: { create: async (arg) => { created = arg; return { id: 'newdb', properties: { Name: { type: 'title' } } }; } } };
+  const result = await createDatabase(client, { parentPageId: 'pg1', title: 'personal' });
+  assert.equal(result.databaseId, 'newdb');
+  assert.equal(result.titleProperty, 'Name');
+  assert.equal(created.parent.page_id, 'pg1');
+  assert.deepEqual(Object.keys(created.properties).sort(), ['Confidence', 'Created', 'Name', 'Source URL', 'Status', 'Summary', 'Tags', 'Type', 'Updated']);
+  await assert.rejects(() => createDatabase(client, {}), /부모 페이지 id가 필요/);
+});
+
+test('inspectDatabase merges the retrieved title with the schema diff', async () => {
+  const client = { databases: { retrieve: async () => ({ title: [{ plain_text: 'Notes' }], properties: { Name: { type: 'title' } } }) } };
+  const info = await inspectDatabase(client, { databaseId: 'db' });
+  assert.equal(info.title, 'Notes');
+  assert.equal(info.ok, false);
+  assert.ok(info.missing.includes('Type'));
+});
+
+test('applySchema adds only the missing non-title properties', async () => {
+  let updated;
+  const client = { databases: { update: async (arg) => { updated = arg; } } };
+  const added = await applySchema(client, { databaseId: 'db', missing: ['Type', 'Summary'] });
+  assert.deepEqual(added.sort(), ['Summary', 'Type']);
+  assert.deepEqual(Object.keys(updated.properties).sort(), ['Summary', 'Type']);
+  assert.deepEqual(await applySchema(client, { databaseId: 'db', missing: [] }), []);
 });

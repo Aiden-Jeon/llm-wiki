@@ -279,16 +279,20 @@ llmwiki inbox pull personal --dry-run           # Notion inbox 새 항목 미리
 
 로컬에서 작업한 위키를 원격 저장소에 **단방향(local→원격)** 으로 발행하고(`publish`), 원격 inbox에서 새 정보를 가져옵니다(`inbox pull`). 원격 대상은 **provider**로 추상화되어 있으며, 현재 Notion을 지원합니다.
 
-발행 설정은 볼트와 분리돼 있어 `publish add`로 따로 연결합니다(볼트 추가와 독립). 토큰과 대상 DB를 넘기면 저장 전에 provider API로 검증(토큰 유효성 + 대상 DB 존재)한 뒤, 토큰은 설정 디렉터리 `secrets.json`(`0600`)에, 대상 설정은 전역 `publish.json`에 기록합니다.
+발행 설정은 볼트와 분리돼 있어 `publish add`로 따로 연결합니다(볼트 추가와 독립). 대화형(TTY)으로 실행하면 토큰을 넣은 뒤 **대상 데이터베이스를 새로 만들지 / 기존 것을 쓸지** 물어보므로 DB id를 직접 찾을 필요가 없습니다. 저장 전에 provider API로 검증(토큰 유효성 + 대상 DB)한 뒤, 토큰은 설정 디렉터리 `secrets.json`(`0600`)에, 대상 설정은 전역 `publish.json`에 기록합니다.
 
 ```bash
 # 볼트는 발행과 무관하게 먼저 등록
 llmwiki vault add --name personal --path ~/wikis/personal
 
-# 발행 설정은 따로 연결 (검증 후 토큰 저장 · publish.json 기록)
+# 발행 설정 연결 — 대화형: 토큰 입력 → publish/inbox 대상 선택
+#   · "새 데이터베이스 생성" → 부모 페이지를 고르면 스키마까지 갖춰 만들어 줌
+#   · "기존 데이터베이스 사용" → 접근 가능한 DB 목록에서 선택 (스키마가 다르면 누락 속성 추가 여부를 물음)
+llmwiki publish add personal
+
+# 비대화형(CI 등)은 플래그로 DB id를 직접 지정
 llmwiki publish add personal \
   --remote notion --remote-token secret_xxx --publish-db <db-id> --inbox-db <inbox-db-id>
-# 또는 `llmwiki publish add personal`로 대화형 진행 (토큰은 가려서 입력)
 
 llmwiki publish list                 # 등록된 발행 설정 확인
 llmwiki publish personal --dry-run   # diff 미리보기 (토큰 없이도 가능)
@@ -318,7 +322,7 @@ llmwiki publish remove personal      # 발행 설정 삭제 (--purge-token으로
 
 #### Notion 데이터베이스 속성과 뷰
 
-각 위키 페이지는 대상 DB의 **한 행(page)**으로 발행되고, frontmatter는 아래 속성으로 매핑됩니다. Notion은 속성을 자동 생성하지 않으므로, **대상 DB에 아래 컬럼을 미리 만들어 두어야** 값이 채워집니다(없는 컬럼은 무시됨).
+각 위키 페이지는 대상 DB의 **한 행(page)**으로 발행되고, frontmatter는 아래 속성으로 매핑됩니다. `publish add`에서 **"새 데이터베이스 생성"** 을 고르면 이 컬럼을 갖춰 만들어 주고, **"기존 데이터베이스 사용"** 시 누락 컬럼이 있으면 추가할지 물어봅니다(직접 만든 DB라면 아래 컬럼이 있어야 값이 채워지고, 없는 컬럼은 무시됨).
 
 | frontmatter | Notion 속성 | 타입 |
 |---|---|---|

@@ -154,6 +154,8 @@ capture 옵션:
     { "version": 1, "vaults": { "personal": { "provider": "notion",
         "publish": { "databaseId": "…" }, "inbox": { "databaseId": "…" }, "allowPublish": false } } }
   llmwiki publish add <vault>로 이 엔트리를 생성하고 토큰을 secrets.json(0600)에 저장합니다.
+  대화형(TTY)이면 대상 데이터베이스를 새로 만들거나 기존 목록에서 고를 수 있어(DB id 직접 입력 불필요),
+  비대화형은 --publish-db/--inbox-db로 id를 직접 지정합니다.
   provider가 원격 대상을 결정합니다(현재 지원: notion). publish는 wiki/** 페이지를
   단방향 push해 view를 발행하고, 발행 상태는 <vault>/_meta/remote-map.json에 기록합니다
   (설정=전역, 상태=볼트: 상태는 git 볼트와 함께 이동해 여러 머신에서 중복 발행을 막습니다).
@@ -474,31 +476,71 @@ export async function configureRemote(paths, vault, opts = {}, { getProvider: re
   let token = opts['remote-token'];
   if (!token) {
     if (!tty) throw new Error(`--remote 사용 시 --remote-token이 필요합니다.\n사용법: ${PUBLISH_ADD_USAGE}`);
+    // provider가 발급 안내를 제공하면 토큰 입력 전에 보여준다(어디서 받는지 막막하지 않게).
+    // p.note는 CJK·긴 URL에서 테두리가 틀어지므로 displayWidth 기반 renderNote로 그린다.
+    if (provider.tokenHelp) {
+      const help = provider.tokenHelp;
+      const body = [help.url && `토큰 발급: ${help.url}`, ...(help.lines || [])].filter(Boolean).join('\n');
+      if (body) console.log(renderNote(body, `${provider.name} 토큰 발급 안내`));
+    }
     const entered = await p.password({ message: `${provider.name} 토큰`, mask: '•' });
     if (cancelPrompt(entered)) return false;
     token = entered;
   }
 
-  // 대상 DB id: 플래그 우선, TTY는 각각 물어본다. 최소 하나는 있어야 한다.
-  let publishDb = opts['publish-db'];
-  let inboxDb = opts['inbox-db'];
-  if (!publishDb && !inboxDb && tty) {
-    const s = await p.text({ message: 'publish 대상 데이터베이스 id (없으면 비움)', defaultValue: '' });
-    if (cancelPrompt(s)) return false;
-    publishDb = (s || '').trim();
-    const i = await p.text({ message: 'inbox 데이터베이스 id (없으면 비움)', defaultValue: '' });
-    if (cancelPrompt(i)) return false;
-    inboxDb = (i || '').trim();
+  // 클라이언트 생성 + 토큰 검증을 먼저 한다(대화형 대상 선택이 client를 쓴다).
+  // 실패하면 아무것도 저장하지 않는다.
+  let client;
+  const spinTok = tty ? p.spinner() : null;
+  if (spinTok) spinTok.start('토큰 검증 중');
+  try {
+    client = await provider.createClient(token);
+    if (typeof provider.validateToken === 'function') await provider.validateToken(client);
+  } catch (error) {
+    if (spinTok) spinTok.stop('검증 실패');
+    throw error;
   }
+  if (spinTok) spinTok.stop('토큰 확인 완료');
+
+  // 대상 해소: TTY이고 provider가 목록/생성을 지원하면 대화형(새로 생성/기존 선택/건너뛰기),
+  // 아니면 플래그(--publish-db/--inbox-db)로 받고 verifyDatabase로 존재만 확인한다.
+  let publishDb;
+  let inboxDb;
+  let publishTitleProp;
+  const interactive = tty && typeof provider.listDatabases === 'function';
+  if (interactive) {
+    // 새 DB 생성 시 기본 이름은 볼트명 + 목적(publish/inbox)이 드러나게 제안한다.
+    const pub = await selectRemoteDatabase(provider, client, { label: 'publish', checkSchema: true, defaultName: `${vault.name} Wiki` });
+    if (pub && pub.cancelled) return false;
+    if (pub) { publishDb = pub.databaseId; publishTitleProp = pub.titleProperty; }
+    const ibx = await selectRemoteDatabase(provider, client, { label: 'inbox', checkSchema: false, defaultName: `${vault.name} Inbox` });
+    if (ibx && ibx.cancelled) return false;
+    if (ibx) inboxDb = ibx.databaseId;
+  } else {
+    publishDb = opts['publish-db'];
+    inboxDb = opts['inbox-db'];
+    // 목록 미지원 provider를 TTY에서 쓸 때의 폴백: id를 직접 입력받는다.
+    if (tty && !publishDb && !inboxDb) {
+      const s = await p.text({ message: 'publish 대상 데이터베이스 id (없으면 비움)', defaultValue: '' });
+      if (cancelPrompt(s)) return false;
+      publishDb = (s || '').trim();
+      const i = await p.text({ message: 'inbox 데이터베이스 id (없으면 비움)', defaultValue: '' });
+      if (cancelPrompt(i)) return false;
+      inboxDb = (i || '').trim();
+    }
+  }
+
   if (!publishDb && !inboxDb) {
-    const note = 'publish-db 또는 inbox-db 중 최소 하나가 필요합니다. 원격 설정을 건너뜁니다.';
+    const note = interactive
+      ? '대상을 하나도 선택하지 않았습니다. 원격 설정을 건너뜁니다.'
+      : 'publish-db 또는 inbox-db 중 최소 하나가 필요합니다. 원격 설정을 건너뜁니다.';
     if (tty) p.log.warn(note); else console.error(note);
     return false;
   }
 
   // secure 볼트는 publish(민감 방향)에 명시적 allowPublish가 필요하다. 없으면 inbox만 설정한다.
-  let allowPublish = false;
   if (publishDb && vault.kind === 'secure') {
+    let allowPublish;
     if (tty) {
       p.log.warn(`secure 볼트를 ${provider.name}에 push하게 됩니다. 고객명·자격증명·내부 URL 익명화를 확인하세요.`);
       const ok = await p.confirm({ message: `${vault.name}(secure) publish를 활성화할까요?`, initialValue: false });
@@ -515,28 +557,19 @@ export async function configureRemote(paths, vault, opts = {}, { getProvider: re
     }
   }
 
-  // 저장 전 실호출 검증: 실패하면 아무것도 저장/기록하지 않는다.
-  const spin = tty ? p.spinner() : null;
-  if (spin) spin.start('원격 연결 검증 중');
-  try {
-    const client = await provider.createClient(token);
-    if (typeof provider.validateToken === 'function') await provider.validateToken(client);
-    if (typeof provider.verifyDatabase === 'function') {
-      if (publishDb) await provider.verifyDatabase(client, { databaseId: publishDb });
-      if (inboxDb) await provider.verifyDatabase(client, { databaseId: inboxDb });
-    }
-  } catch (error) {
-    if (spin) spin.stop('검증 실패');
-    throw error;
+  // 비-대화형 경로는 대상 DB의 존재를 여기서 확인한다(대화형은 목록/생성 과정에서 이미 확인됨).
+  if (!interactive && typeof provider.verifyDatabase === 'function') {
+    if (publishDb) await provider.verifyDatabase(client, { databaseId: publishDb });
+    if (inboxDb) await provider.verifyDatabase(client, { databaseId: inboxDb });
   }
-  if (spin) spin.stop('검증 완료');
 
-  // 검증 통과 → 토큰은 store에만, 대상 설정은 전역 publish.json에(토큰 없이) 기록한다.
+  // 통과 → 토큰은 store에만, 대상 설정은 전역 publish.json에(토큰 없이) 기록한다.
   setSecret(paths.secrets, provider.name, vault.name, token);
   const patch = { provider: provider.name };
   if (publishDb) {
     patch.publish = { databaseId: publishDb };
-    if (opts['title-prop']) patch.publish.titleProperty = opts['title-prop'];
+    const titleProp = opts['title-prop'] || publishTitleProp;
+    if (titleProp) patch.publish.titleProperty = titleProp;
     if (vault.kind === 'secure') patch.allowPublish = true;
   }
   if (inboxDb) patch.inbox = { databaseId: inboxDb };
@@ -545,6 +578,89 @@ export async function configureRemote(paths, vault, opts = {}, { getProvider: re
   const summary = `발행 설정 · ${vault.name} → ${provider.name}${publishDb ? ' · publish' : ''}${inboxDb ? ' · inbox' : ''} · 토큰 저장됨(secrets.json)`;
   if (tty) p.log.success(summary); else console.log(summary);
   return true;
+}
+
+/**
+ * 대화형으로 원격 대상 데이터베이스를 정한다(TTY 전용). 새로 생성 / 기존 선택 / 건너뛰기.
+ * checkSchema면 기존 DB 선택 시 publish 스키마와 비교해 누락/충돌을 보여주고 진행 여부를 묻는다.
+ * 반환: { databaseId, titleProperty? }(정함) | null(건너뜀·후보 없음) | { cancelled: true }(중단).
+ */
+async function selectRemoteDatabase(provider, client, { label, checkSchema, defaultName = 'llm-wiki' }) {
+  const withSpinner = async (message, fn) => {
+    const spin = p.spinner();
+    spin.start(message);
+    try { const result = await fn(); spin.stop(`${message} 완료`); return result; }
+    catch (error) { spin.stop(`${message} 실패`); throw error; }
+  };
+
+  const action = await p.select({
+    message: `${label} 대상 데이터베이스`,
+    options: [
+      { value: 'existing', label: '기존 데이터베이스 사용' },
+      { value: 'new', label: '새 데이터베이스 생성' },
+      { value: 'skip', label: '설정 안 함' },
+    ],
+    initialValue: 'skip',
+  });
+  if (cancelPrompt(action)) return { cancelled: true };
+  if (action === 'skip') return null;
+
+  if (action === 'new') {
+    if (typeof provider.listPages !== 'function' || typeof provider.createDatabase !== 'function') {
+      p.log.warn('이 provider는 데이터베이스 생성을 지원하지 않습니다. 기존 데이터베이스를 사용하세요.');
+      return { cancelled: true };
+    }
+    const pages = await withSpinner('페이지 목록 불러오는 중', () => provider.listPages(client, {}));
+    if (!pages.length) {
+      p.log.warn(`접근 가능한 페이지가 없습니다. ${provider.connectHelp || '대상을 provider에 연결한 뒤 다시 시도하세요.'}`);
+      return { cancelled: true };
+    }
+    const parent = await p.select({
+      message: '새 데이터베이스를 만들 부모 페이지',
+      options: pages.map((pg) => ({ value: pg.id, label: pg.title || '(제목 없음)' })),
+    });
+    if (cancelPrompt(parent)) return { cancelled: true };
+    const title = await p.text({ message: '새 데이터베이스 이름', defaultValue: defaultName, placeholder: defaultName });
+    if (cancelPrompt(title)) return { cancelled: true };
+    return withSpinner('데이터베이스 생성 중', () => provider.createDatabase(client, { parentPageId: parent, title: (title || defaultName).trim() }));
+  }
+
+  // 기존 선택
+  const dbs = await withSpinner('데이터베이스 목록 불러오는 중', () => provider.listDatabases(client, {}));
+  if (!dbs.length) {
+    p.log.warn(`접근 가능한 데이터베이스가 없습니다. ${provider.connectHelp || '대상을 provider에 연결한 뒤 다시 시도하세요.'}`);
+    return { cancelled: true };
+  }
+  const dbId = await p.select({
+    message: `${label} 데이터베이스 선택`,
+    options: dbs.map((db) => ({ value: db.id, label: db.title })),
+  });
+  if (cancelPrompt(dbId)) return { cancelled: true };
+
+  if (!checkSchema || typeof provider.inspectDatabase !== 'function') return { databaseId: dbId };
+
+  const info = await withSpinner('스키마 확인 중', () => provider.inspectDatabase(client, { databaseId: dbId }));
+  if (info.ok) return { databaseId: dbId, titleProperty: info.titleProperty };
+
+  // 스키마 불일치 → 내역을 보여주고 진행 여부를 묻는다(싫다고 하면 중단).
+  const lines = [];
+  if (info.missing.length) lines.push(`누락된 속성(추가 가능): ${info.missing.join(', ')}`);
+  if (info.conflicts.length) {
+    lines.push(`타입이 다른 속성(자동 수정 안 함, 손으로 고쳐야 함):`);
+    for (const c of info.conflicts) lines.push(`  · ${c.name}: 현재 ${c.actual} → 기대 ${c.expected}`);
+  }
+  console.log(renderNote(lines.join('\n'), `${label} 스키마 불일치`));
+
+  const message = info.missing.length
+    ? '누락 속성을 추가하고 계속할까요? (타입 충돌은 그대로 둡니다)'
+    : '이 상태로 계속할까요?';
+  const proceed = await p.confirm({ message, initialValue: false });
+  if (cancelPrompt(proceed) || !proceed) return { cancelled: true };
+
+  if (info.missing.length && typeof provider.applySchema === 'function') {
+    await withSpinner('스키마 갱신 중', () => provider.applySchema(client, { databaseId: dbId, missing: info.missing }));
+  }
+  return { databaseId: dbId, titleProperty: info.titleProperty };
 }
 
 /**

@@ -51,7 +51,7 @@ secure 볼트로 쓰기가 해소되면:
 원격 연동(`llmwiki publish`, `llmwiki inbox pull`)의 결정론 규칙:
 
 - **발행 설정은 볼트와 분리 — 전역 config에.** 발행 설정(provider·대상 DB·`allowPublish` 등)은 볼트가 아니라 전역 config의 `publish.json`에 볼트 이름을 키로 둔다. 볼트는 이름으로 자기 엔트리를 참조만 한다. `설정=전역, 상태=볼트`: 발행 상태(`_meta/remote-map.json`, `_meta/remote-inbox.json`)만 볼트에 남겨 git 볼트와 함께 이동하게 하고(여러 머신에서 중복 발행 방지), 어디로·무엇을 발행할지는 볼트 밖에서 관리한다.
-- **provider로 추상화.** 원격 대상은 `publish.json` 엔트리의 `provider` 값으로 결정한다(현재 지원: `notion`). 새 대상은 `src/providers/<name>.js` 구현 + 레지스트리 등록으로 붙고, orchestrator·diff·보안 규칙은 provider-중립으로 공유된다. 발행 설정과 토큰은 `llmwiki publish add <vault>`로 설정하며(`vault add`와 분리), 저장 전 provider API(토큰 유효성 + 대상 DB 존재)로 검증한다.
+- **provider로 추상화.** 원격 대상은 `publish.json` 엔트리의 `provider` 값으로 결정한다(현재 지원: `notion`). 새 대상은 `src/providers/<name>.js` 구현 + 레지스트리 등록으로 붙고, orchestrator·diff·보안 규칙은 provider-중립으로 공유된다. 발행 설정과 토큰은 `llmwiki publish add <vault>`로 설정하며(`vault add`와 분리), 저장 전 provider API(토큰 유효성 + 대상 DB 존재)로 검증한다. 대화형(TTY)이면 provider의 선택 메서드(`listDatabases`/`listPages`/`createDatabase`/`inspectDatabase`/`applySchema`)로 대상 DB를 새로 만들거나 기존 것을 고르게 하고(id 직접 입력 불필요), 그 메서드가 없거나 비-TTY면 `--publish-db`/`--inbox-db` 플래그로 폴백한다.
 - **호출당 정확히 한 볼트.** `publish`/`inbox`는 대상 볼트를 하나로 해소하고 그 볼트의 토큰·대상만 쓴다("publish all" 없음).
 - **토큰은 env 또는 설정 디렉터리 `secrets.json`에만.** 마크다운 레지스트리·git·`publish.json`에는 저장하지 않는다. `secrets.json`은 config 디렉터리에 `0600`으로 두고 `.gitignore`·`config export` 번들에서 제외한다. 조회 순서: `publish.json` 엔트리의 `tokenEnv`(env) → `LLMWIKI_<PROVIDER>_TOKEN_<VAULT>`(env) → `LLMWIKI_<PROVIDER>_TOKEN`(env) → `secrets.json`(`provider:<VAULT>` → `provider:*`). env가 store보다 우선이다.
 - **`kind: secure` 볼트 publish는 명시적 opt-in.** `publish.json` 엔트리에 `"allowPublish": true`가 없으면 거부하고, 첫 push 전 확인·익명화 게이트를 거친다.
