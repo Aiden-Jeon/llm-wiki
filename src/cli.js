@@ -4,6 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { stdin } from 'node:process';
 import * as p from '@clack/prompts';
 import { getPaths } from './paths.js';
+import { lintVault } from './lint.js';
 import {
   SUPPORTED_AGENTS,
   normalizeAgentCommand,
@@ -43,6 +44,8 @@ const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운영합�
   llmwiki vault list [--json]     등록된 볼트 목록
   llmwiki vault show <name>       볼트 상세 정보 및 상태
   llmwiki vault remove <name>     볼트 제거
+  llmwiki vault lint [name] [--json]  볼트가 위키 스키마를 지키는지 검사
+  llmwiki vault scaffold [name]   누락된 스키마 구조를 생성 (기존 파일 보존)
   llmwiki agent list [--json]     에이전트 실행 명령 매핑 확인
   llmwiki agent set <name> [--add-dir] <cmd> [-- <명령 인자>]  claude/codex를 다른 명령으로 실행
   llmwiki agent reset <name>      실행 명령을 기본값(claude/codex)으로 복원
@@ -391,6 +394,91 @@ async function removeVault(paths, name, { confirm = false } = {}) {
   if (stdin.isTTY) p.log.success(`삭제됨 · ${name} (실제 볼트 파일은 삭제하지 않았습니다.)`);
   else console.log(`제거됨: ${name}`);
   return true;
+}
+
+// lint/scaffold 대상 볼트를 해소한다. 이름이 있으면 그 볼트, 없으면 등록된 전 볼트.
+function resolveTargets(paths, name) {
+  const { vaults, issues } = readRegistryFile(paths.registry);
+  reportIssues(paths.registry, issues);
+  if (!name) return vaults;
+  const vault = vaults.find((item) => item.name === name);
+  if (!vault) throw new Error(`등록되지 않은 볼트입니다: ${name}`);
+  return [vault];
+}
+
+function lintVaults(paths, args = []) {
+  const { options, rest } = parseOptions(args, { allowed: ['json'], booleans: ['json'], usage: 'llmwiki vault lint [name] [--json]' });
+  const targets = resolveTargets(paths, rest[0]);
+  if (!targets.length) {
+    console.log('등록된 볼트가 없습니다. `llmwiki vault add`로 추가하세요.');
+    return;
+  }
+
+  const report = targets.map((vault) => ({ vault: vault.name, path: vault.path, kind: vault.kind, results: lintVault(vault.path) }));
+
+  if (options.json) {
+    console.log(JSON.stringify({ registry: paths.registry, vaults: report }, null, 2));
+    if (report.some((entry) => entry.results.some((result) => result.level === 'error'))) process.exitCode = 1;
+    return;
+  }
+
+  let errors = 0;
+  for (const entry of report) {
+    const entryErrors = entry.results.filter((result) => result.level === 'error').length;
+    errors += entryErrors;
+    if (stdin.isTTY) {
+      p.intro(`llmwiki vault lint · ${entry.vault} (${entry.kind})`);
+      for (const result of entry.results) p.log[result.level](`${result.label} · ${result.detail}`);
+      p.outro(entryErrors ? `${entry.vault}: 위반 ${entryErrors}개` : `${entry.vault}: 스키마 위반 없음`);
+    } else {
+      for (const result of entry.results) console.log(`[${result.level.toUpperCase()}] ${entry.vault} · ${result.label}: ${result.detail}`);
+    }
+  }
+  if (errors) process.exitCode = 1;
+}
+
+// templates/vault의 스켈레톤을 볼트에 가산적으로 복사한다. 기존 파일은 절대 덮어쓰지 않는다.
+// created에는 볼트 루트 기준 상대 경로를 쌓아 재귀 깊이와 무관하게 표시가 정확하도록 한다.
+function scaffoldTree(sourceDir, destDir, root, created) {
+  for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+    const source = path.join(sourceDir, entry.name);
+    const dest = path.join(destDir, entry.name);
+    if (entry.isDirectory()) {
+      if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
+      scaffoldTree(source, dest, root, created);
+    } else if (!fs.existsSync(dest)) {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(source, dest);
+      created.push(path.relative(root, dest));
+    }
+  }
+}
+
+function scaffoldVaults(paths, args = []) {
+  const { rest } = parseOptions(args, { allowed: [], usage: 'llmwiki vault scaffold [name]' });
+  const targets = resolveTargets(paths, rest[0]);
+  if (!targets.length) {
+    console.log('등록된 볼트가 없습니다. `llmwiki vault add`로 추가하세요.');
+    return;
+  }
+  if (!fs.existsSync(paths.vaultTemplateDir)) {
+    throw new Error(`볼트 템플릿을 찾을 수 없습니다: ${paths.vaultTemplateDir}`);
+  }
+
+  for (const vault of targets) {
+    fs.mkdirSync(vault.path, { recursive: true });
+    const created = [];
+    scaffoldTree(paths.vaultTemplateDir, vault.path, vault.path, created);
+    // .gitkeep은 목록에서 감춰 노이즈를 줄인다(디렉터리 생성은 이미 반영됨).
+    const shown = created.filter((rel) => path.basename(rel) !== '.gitkeep');
+    if (!created.length) {
+      const message = `${vault.name}: 이미 스키마 구조를 갖추고 있습니다.`;
+      if (stdin.isTTY) p.log.info(message); else console.log(message);
+      continue;
+    }
+    const message = `${vault.name}: ${created.length}개 항목 생성${shown.length ? `\n${shown.map((rel) => `  + ${rel}`).join('\n')}` : ''}`;
+    if (stdin.isTTY) p.log.success(message); else console.log(message);
+  }
 }
 
 function listAgents(paths, args = []) {
@@ -897,7 +985,9 @@ export async function main(args) {
     if (action === 'list') return listVaults(paths, vaultArgs);
     if (action === 'show') return showVault(paths, vaultArgs[0]);
     if (action === 'remove') return removeVault(paths, vaultArgs[0], { confirm: true });
-    throw new Error('사용법: llmwiki vault <add|list|show|remove>');
+    if (action === 'lint') return lintVaults(paths, vaultArgs);
+    if (action === 'scaffold') return scaffoldVaults(paths, vaultArgs);
+    throw new Error('사용법: llmwiki vault <add|list|show|remove|lint|scaffold>');
   }
   if (command === 'agent' || command === 'agents') {
     const [action = 'list', name, ...commandTokens] = rest;

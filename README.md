@@ -43,6 +43,8 @@ llmwiki vault list
 llmwiki vault list --json     # 스크립트/CI용 기계 판독 출력
 llmwiki vault show personal
 llmwiki vault remove personal
+llmwiki vault lint personal   # 위키 스키마 적합성 검사 (--json 지원)
+llmwiki vault scaffold personal   # 누락된 스키마 구조 생성 (기존 파일 보존)
 llmwiki doctor
 llmwiki config path
 llmwiki config edit
@@ -110,6 +112,8 @@ CLI는 사용자 데이터 디렉터리에 관리형 실행 워크스페이스�
 |------|------|
 | `llmwiki setup` | 사용자 설정 초기화 |
 | `llmwiki vault add/list/show/remove` | 볼트 등록 및 상태 관리 (`list --json` 지원) |
+| `llmwiki vault lint [name]` | 볼트가 위키 스키마를 지키는지 검사 (`--json` 지원, CI 친화) |
+| `llmwiki vault scaffold [name]` | 위키 스키마 구조를 생성·보완 (기존 파일은 덮어쓰지 않음) |
 | `llmwiki skill add/list/show/edit/remove` | 커스텀 스킬 관리 (`list --json` 지원) |
 | `llmwiki skill templates` | 내장 스킬 템플릿 목록 |
 | `llmwiki skill path [name]` | 스킬 원본 경로 출력 |
@@ -126,6 +130,7 @@ CLI는 사용자 데이터 디렉터리에 관리형 실행 워크스페이스�
 | wiki-add | `/wiki-add <입력>` | `wiki-add <입력>` | 지식을 적절한 볼트에 추가(ingest) |
 | wiki-search | `/wiki-search <질의>` | `wiki-search <질의>` | 모든 볼트를 가로질러 검색 |
 | wiki-use | `/wiki-use <질문>` | `wiki-use <질문>` | 기존 지식으로 답하거나 새 분석 생성 |
+| wiki-lint | `/wiki-lint [볼트]` | `wiki-lint [볼트]` | 스키마 적합성 평가 후 수정 권고·적용 |
 | 커스텀 스킬 | `/<skill>` | `<skill>` | `llmwiki skill`로 등록한 사용자 정의 작업 |
 
 입력값으로 URL, 로컬 파일 경로, Notion URL, 자유 텍스트를 모두 넘길 수 있습니다.
@@ -187,6 +192,8 @@ llmwiki skill remove linkedin-draft
 ## 볼트 요구사항
 
 각 볼트는 최소한 자체 `CLAUDE.md`(위키 스키마와 워크플로우) 및 `index.md`를 가지는 것을 권장합니다. Codex 전용 지침이 필요하면 `AGENTS.md`를 추가할 수 있습니다. `secure` 볼트는 보안 원칙을 명시해야 합니다.
+
+표준 위키 스키마(3계층 `raw/` → `wiki/{entities,concepts,sources,analyses}` → `_meta/`, frontmatter·태그통제·index/log 규약)의 정본은 `templates/vault/`에 있습니다. 새 볼트는 `llmwiki vault scaffold <name>`으로 이 골격을 생성하고, `llmwiki vault lint <name>`으로 적합성을 검사할 수 있습니다. 기계 검사 계약은 각 볼트의 `_meta/schema.md`에 명문화되어 있습니다.
 
 ## 개발
 
