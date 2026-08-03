@@ -40,7 +40,6 @@ function readSkillFiles(dir) {
 export function buildExportBundle(paths) {
   const vaults = readRegistry(paths.registry, { strict: false }).map((v) => ({
     name: v.name,
-    kind: v.kind,
     backend: v.backend,
     origin: v.origin,
     signals: v.signals,
@@ -151,7 +150,7 @@ export function applyImportBundle(paths, bundle, { force = false, provisionGitVa
       if (!provisionGitVault) throw new Error('git 볼트를 clone할 수 없습니다(provisioner 미지정).');
       const { path: clonedPath, origin } = provisionGitVault(entry);
       const vault = normalizeVault({
-        name: entry.name, path: clonedPath, kind: entry.kind, backend: 'git', origin,
+        name: entry.name, path: clonedPath, backend: 'git', origin,
         signals: entry.signals, notes: entry.notes,
       });
       byName.set(vault.name, vault);

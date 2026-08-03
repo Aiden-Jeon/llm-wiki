@@ -78,8 +78,7 @@ llmwiki publish add personal \
         "databaseId": "…",
         "syncedSubdirs": ["wiki/entities", "wiki/concepts", "wiki/sources", "wiki/analyses"]
       },
-      "inbox": { "databaseId": "…" },
-      "allowPublish": false
+      "inbox": { "databaseId": "…" }
     }
   }
 }
@@ -131,7 +130,3 @@ llmwiki publish view personal
 ```
 
 강제 재생성은 중복을 방지하지 않으므로 필요한 경우에만 실행합니다.
-
-## Secure 볼트
-
-`secure` 볼트는 발행 설정에 `allowPublish: true`가 있어야 하며 외부 전송 전에 확인과 익명화 절차를 거칩니다. 대화형 설정 또는 `publish add --allow-publish`로 명시적으로 허용해야 합니다.

@@ -25,8 +25,8 @@ function tmpPaths() {
 test('buildExportBundle includes vaults (no path) and skills, excludes agents/tokens', () => {
   const paths = tmpPaths();
   writeRegistry(paths.registry, [
-    { name: 'gwiki', path: '/tmp/gwiki', kind: 'open', backend: 'git', origin: 'git@x:y.git' },
-    { name: 'local', path: '/tmp/local', kind: 'secure' },
+    { name: 'gwiki', path: '/tmp/gwiki', backend: 'git', origin: 'git@x:y.git' },
+    { name: 'local', path: '/tmp/local' },
   ], [{ name: 'claude', command: 'vibe agent', addDir: false }]);
   createSkill(paths.skillsDir, { name: 'weekly-retro', description: '주간 회고' });
 
@@ -43,7 +43,7 @@ test('buildExportBundle includes vaults (no path) and skills, excludes agents/to
 
 test('writeExportBundle then readExportBundle round-trips', () => {
   const paths = tmpPaths();
-  writeRegistry(paths.registry, [{ name: 'a', path: '/tmp/a', kind: 'open' }]);
+  writeRegistry(paths.registry, [{ name: 'a', path: '/tmp/a' }]);
   const out = path.join(os.tmpdir(), `bundle-${Date.now()}.json`);
   writeExportBundle(paths, out);
   const bundle = readExportBundle(out);
@@ -61,8 +61,8 @@ test('applyImportBundle restores skills and clones git vaults via the provisione
   const src = tmpPaths();
   createSkill(src.skillsDir, { name: 'weekly-retro', description: '회고' });
   writeRegistry(src.registry, [
-    { name: 'gwiki', path: '/tmp/gwiki', kind: 'open', backend: 'git', origin: 'git@x:y.git' },
-    { name: 'localonly', path: '/tmp/localonly', kind: 'open' },
+    { name: 'gwiki', path: '/tmp/gwiki', backend: 'git', origin: 'git@x:y.git' },
+    { name: 'localonly', path: '/tmp/localonly' },
   ]);
   const bundle = buildExportBundle(src);
 

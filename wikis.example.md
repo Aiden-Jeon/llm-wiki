@@ -6,7 +6,6 @@
 
 - `name` — 볼트 식별자 (라우팅/명령에서 `--vault <name>`으로 지정)
 - `path` — 볼트의 로컬 절대 경로 (`vault add` 사용 시 `~` 확장 및 절대 경로 변환)
-- `kind` — `open`(일반) 또는 `secure`(보안 규칙 적용: 쓰기 전 확인·익명화)
 - `backend` — `local`(일반 폴더) 또는 `git`(git repo). 기본값은 `local`
 - `origin` — git backend의 원격 URL. local backend이면 비워 둠
 - `signals` — 이 볼트로 라우팅할 내용 신호 (쉼표 구분)
@@ -14,10 +13,10 @@
 
 ## 볼트
 
-| name | path | kind | backend | origin | signals | notes |
-|------|------|------|---------|--------|---------|-------|
-| personal | /Users/you/wikis/personal | open | local | | 커리어, resume, LinkedIn, 일반 AI/ML 학습, 논문, 공개 아티클 | 커리어 자료 보유 |
-| work | /Users/you/llmwiki-vaults/work | secure | git | git@github.com:you/work-wiki.git | 고객명, 사내 제품/기능, Slack/회의/내부 출처, 프로젝트 코드, 내부 URL | private 유지, 사례 익명화 |
+| name | path | backend | origin | signals | notes |
+|------|------|---------|--------|---------|-------|
+| personal | /Users/you/wikis/personal | local | | 커리어, resume, LinkedIn, 일반 AI/ML 학습, 논문, 공개 아티클 | 커리어 자료 보유 |
+| work | /Users/you/llmwiki-vaults/work | git | git@github.com:you/work-wiki.git | 고객명, 사내 제품/기능, Slack/회의/내부 출처, 프로젝트 코드, 내부 URL | 사례 익명화 |
 
 ## 에이전트 실행 명령 (선택)
 
