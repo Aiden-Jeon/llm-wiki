@@ -82,3 +82,45 @@ test('clone → edit → commit → push → pull round-trips content', { skip: 
   run(['-C', b, 'config', 'user.name', 'B']);
   assert.ok(gitPullRebase(b).ok);
 });
+
+// 빈 bare 원격(초기 커밋 없음)만 만든다.
+function emptyRemote() {
+  const root = tmp('empty-remote');
+  const remote = path.join(root, 'remote.git');
+  run(['init', '--bare', remote]);
+  return remote;
+}
+
+test('first sync against an empty remote: no upstream, gitPush sets it and pushes', { skip: !HAS_GIT }, () => {
+  const remote = emptyRemote();
+  const a = tmp('empty-a');
+  fs.rmSync(a, { recursive: true, force: true });
+  gitClone(remote, a); // 빈 원격을 clone → 추적 브랜치 없음
+  run(['-C', a, 'config', 'user.email', 'a@example.com']);
+  run(['-C', a, 'config', 'user.name', 'A']);
+
+  // 아직 upstream이 없다.
+  assert.equal(gitmod.hasUpstream(a), false);
+
+  fs.writeFileSync(path.join(a, 'first.md'), 'first commit\n');
+  assert.equal(gitAddCommit(a, 'init').committed, true);
+  // gitPush가 upstream을 -u origin HEAD로 설정하며 첫 push를 해낸다.
+  assert.ok(gitmod.gitPush(a).ok);
+  assert.equal(gitmod.hasUpstream(a), true);
+
+  // 다른 clone에서 첫 커밋이 보인다.
+  const b = tmp('empty-b');
+  fs.rmSync(b, { recursive: true, force: true });
+  gitClone(remote, b);
+  assert.equal(fs.readFileSync(path.join(b, 'first.md'), 'utf8'), 'first commit\n');
+});
+
+test('gitSetRemote adds then updates the origin url', { skip: !HAS_GIT }, () => {
+  const dir = tmp('setremote');
+  run(['init', dir]);
+  assert.equal(gitmod.gitRemoteUrl(dir), '');
+  gitmod.gitSetRemote(dir, 'https://example.com/a.git');
+  assert.equal(gitmod.gitRemoteUrl(dir), 'https://example.com/a.git');
+  gitmod.gitSetRemote(dir, 'https://example.com/b.git');
+  assert.equal(gitmod.gitRemoteUrl(dir), 'https://example.com/b.git');
+});

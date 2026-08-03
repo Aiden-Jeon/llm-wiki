@@ -44,6 +44,8 @@ import {
   gitPullRebase,
   gitPush,
   gitRemoteUrl,
+  gitSetRemote,
+  hasUpstream,
   isGitAvailable,
   isGitRepo,
 } from './git.js';
@@ -351,9 +353,26 @@ function ensureGitVault(paths, { name, resolvedPath, origin }) {
   const target = resolvedPath || path.join(paths.vaultsHome, name);
 
   if (isGitRepo(target)) {
-    const detected = origin || gitRemoteUrl(target);
-    if (!detected) throw new Error(`${target}에 origin 원격이 없습니다. --origin으로 지정하세요.`);
-    return { path: target, origin: detected };
+    const actual = gitRemoteUrl(target);
+    // origin을 지정하지 않았으면 저장소의 실제 remote를 그대로 쓴다.
+    if (!origin) {
+      if (!actual) throw new Error(`${target}에 origin 원격이 없습니다. --origin으로 지정하세요.`);
+      return { path: target, origin: actual };
+    }
+    // origin을 지정했는데 저장소에 remote가 없으면 그 값으로 설정한다.
+    if (!actual) {
+      gitSetRemote(target, origin);
+      return { path: target, origin };
+    }
+    // 지정한 origin과 저장소의 실제 remote가 다르면, 등록 메타데이터가 실제 push/pull 대상과
+    // 어긋나므로 거부한다(잘못된 origin이 조용히 기록되는 것을 막는다).
+    if (actual !== origin) {
+      throw new Error(
+        `${target}의 실제 origin(${actual})이 지정한 --origin(${origin})과 다릅니다. `
+        + '일치시키거나 --origin을 생략해 실제 값을 쓰세요.',
+      );
+    }
+    return { path: target, origin };
   }
 
   if (!origin) throw new Error(`git backend 볼트는 origin(원격 URL)이 필요합니다.\n사용법: ${VAULT_ADD_USAGE}`);
@@ -639,9 +658,14 @@ async function syncVault(paths, args = []) {
 
   const report = (level, message) => { if (stdin.isTTY) p.log[level](message); else console.log(message); };
 
-  // 1) pull --rebase (--no-pull 상당은 없음; pull은 항상 안전 우선)
-  gitPullRebase(vault.path);
-  report('step', 'pull --rebase 완료');
+  // 1) pull --rebase. 단, 빈 원격에서 clone한 직후에는 추적 브랜치가 없어 pull이 실패한다.
+  //    이 경우 당겨올 것이 없으므로 건너뛰고 첫 커밋·push로 원격을 초기화한다.
+  if (hasUpstream(vault.path)) {
+    gitPullRebase(vault.path);
+    report('step', 'pull --rebase 완료');
+  } else {
+    report('step', '원격에 추적 브랜치가 없어 pull 생략 (첫 sync)');
+  }
   if (options['pull-only']) { report('success', `vault sync 완료(pull-only) · ${vault.name}`); return true; }
 
   // 2) commit

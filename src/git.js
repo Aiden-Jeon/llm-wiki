@@ -57,6 +57,20 @@ export function gitRemoteUrl(dir) {
   return result.ok ? result.stdout : '';
 }
 
+// origin 원격을 설정한다. 이미 있으면 URL을 바꾸고, 없으면 새로 추가한다.
+export function gitSetRemote(dir, url) {
+  const action = gitRemoteUrl(dir) ? 'remote set-url' : 'remote add';
+  const args = gitRemoteUrl(dir)
+    ? ['remote', 'set-url', 'origin', url]
+    : ['remote', 'add', 'origin', url];
+  return gitOrThrow(args, { cwd: dir, action });
+}
+
+// 현재 브랜치에 원격 추적(upstream) 참조가 설정돼 있는지. 빈 원격을 clone하면 없다.
+export function hasUpstream(dir) {
+  return git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], { cwd: dir }).ok;
+}
+
 // origin을 dest로 clone한다. 상위 디렉터리를 만들어 둔다.
 export function gitClone(origin, dest) {
   fs.mkdirSync(path.dirname(dest), { recursive: true });
@@ -88,6 +102,8 @@ export function gitAddCommit(dir, message) {
   return { ok: true, committed: true };
 }
 
+// push한다. upstream이 아직 없으면(빈 원격에서 clone한 첫 push) -u origin HEAD로 설정한다.
 export function gitPush(dir) {
+  if (!hasUpstream(dir)) return gitOrThrow(['push', '-u', 'origin', 'HEAD'], { cwd: dir, action: 'push' });
   return gitOrThrow(['push'], { cwd: dir, action: 'push' });
 }
