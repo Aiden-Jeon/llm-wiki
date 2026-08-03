@@ -4,6 +4,19 @@
 
 지식 추가·검색·활용을 위해 볼트마다 직접 이동할 필요 없이, 각 볼트의 Git 저장소·운영 규칙·보안 경계는 분리해서 유지합니다.
 
+핵심 목적은 **로컬에서 지식을 작업하고, 그 결과를 Notion 같은 원격 저장소에서 보여주는 것**입니다. 전체 흐름은 세 단계입니다.
+
+```text
+① 입력 소스            ②  로컬 위키 (볼트)          ③ 원격 발행
+llmwiki new     ─┐
+llmwiki capture ─┼─▶  raw/ → wiki/ (Markdown)  ─▶  llmwiki sync ─▶ Notion
+llmwiki inbox pull ┘        정본은 로컬                 (local→notion 단방향)
+```
+
+- **입력 소스** — 새 정보를 로컬 볼트로 받아오는 세 개의 독립 창구(`new` / `capture` / `inbox pull`). [자세히](#입력-소스)
+- **로컬 위키** — 볼트의 `raw/`·`wiki/` Markdown이 언제나 정본입니다.
+- **원격 발행** — `llmwiki sync`로 로컬 위키를 Notion에 단방향(local→notion)으로 동기화해 view로 보여줍니다. [자세히](#notion-sync-결과물-발행)
+
 ## 설치
 
 Node.js 18 이상이 필요합니다. macOS/Linux에서 검증했으며, Windows에서는 `.cmd` 셰임을 거친 에이전트 실행을 지원합니다.
