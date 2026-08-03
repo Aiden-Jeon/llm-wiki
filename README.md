@@ -4,34 +4,51 @@
 
 지식 추가·검색·활용을 위해 볼트마다 직접 이동할 필요 없이, 각 볼트의 Git 저장소·운영 규칙·보안 경계는 분리해서 유지합니다.
 
+핵심 목적은 **로컬에서 지식을 작업하고, 여러 머신에서 이어서 작업하며, 그 결과를 Notion 같은 원격 저장소에서 보여주는 것**입니다. 로컬 위키(볼트)를 중심으로 입력·공유·발행이 갈라집니다.
+
+![llm-wiki 전체 흐름: 입력 소스(new/capture/inbox pull) → 로컬 위키(볼트) → git repo(vault sync, 머신 간 공유) / 원격 provider(publish, 단방향 발행)](docs/flow.png)
+
+<!-- 위 이미지는 docs/flow.mmd(mermaid)에서 생성한다. 수정 후 재생성:
+     npx -p @mermaid-js/mermaid-cli mmdc -i docs/flow.mmd -o docs/flow.png -t neutral -b white --scale 3 -->
+
+- **입력 소스** — 새 정보를 로컬 볼트로 받아오는 창구(`new` / `capture` / `inbox pull`). [자세히](#입력-소스)
+- **로컬 위키** — 볼트의 `raw/`·`wiki/` Markdown이 언제나 정본입니다. 볼트는 그냥 로컬 폴더(`local`)일 수도, git repo(`git`)일 수도 있습니다. git 백엔드는 `llmwiki vault sync`로 여러 머신에서 같은 위키를 작업하게 해줍니다. [자세히](#볼트-백엔드-local--git)
+- **원격 발행** — `llmwiki publish`로 로컬 위키를 원격 저장소에 단방향(local→원격)으로 발행해 view로 보여줍니다. 원격 대상은 **provider**로 추상화되어 있어 현재 Notion을 지원하고 확장 가능합니다. [자세히](#원격-발행수집-publish--inbox)
+
+> **파일 공유 vs. view 발행**: `llmwiki vault sync`(git)는 *마크다운 파일 자체*를 머신 간에 공유하고, `llmwiki publish`(provider)는 *위키 view*를 Notion 등에 발행합니다. 두 축은 독립적이라 git 백엔드 볼트를 Notion에도 발행할 수 있습니다.
+
 ## 설치
 
-Node.js 18 이상이 필요합니다. macOS/Linux에서 검증했으며, Windows에서는 `.cmd` 셰임을 거친 에이전트 실행을 지원합니다.
-
-### GitHub 저장소에서 설치
-
-작업용 clone 없이 Git 저장소 URL로 바로 전역 설치할 수 있습니다.
+Node.js 18 이상이 필요합니다.
 
 ```bash
 npm install -g github:Aiden-Jeon/llm-wiki
+```
+
+설치 후 초기 설정을 실행합니다.
+
+```bash
 llmwiki setup
 ```
 
-로컬 개발본을 전역 명령으로 연결하려면 다음을 사용합니다.
+### 소스에서 설치
 
 ```bash
+git clone https://github.com/Aiden-Jeon/llm-wiki.git
+cd llm-wiki
+npm install
 npm link
 ```
 
 ## 설정
 
-초기 설정과 볼트 관리는 모두 CLI에서 할 수 있습니다. 대화형 터미널에서는 선택 메뉴, 입력 검증, 경로 검사, 등록 내용 요약 및 저장 확인을 제공하며, CI나 스크립트에서는 기존 옵션 기반 방식을 그대로 사용할 수 있습니다.
+초기 설정과 볼트 관리는 CLI에서 합니다. `llmwiki setup`은 대화형이며, 플래그로 비대화형 등록도 가능합니다.
 
 ```bash
 # 설정 파일 생성 + 대화형 볼트 등록
 llmwiki setup
 
-# 비대화형 등록
+# 비대화형 등록 (로컬 폴더 볼트)
 llmwiki vault add \
   --name personal \
   --path ~/wikis/personal \
@@ -39,8 +56,15 @@ llmwiki vault add \
   --signals "커리어,AI,논문" \
   --notes "커리어 자료 보유"
 
+# git 백엔드 볼트 등록 — origin에서 clone (path 생략 시 ~/llmwiki-vaults/<name>)
+llmwiki vault add \
+  --name work \
+  --backend git \
+  --origin git@github.com:me/work-wiki.git \
+  --kind secure
+
 llmwiki vault list
-llmwiki vault list --json     # 스크립트/CI용 기계 판독 출력
+llmwiki vault list --json
 llmwiki vault show personal
 llmwiki vault remove personal
 llmwiki vault lint personal   # 위키 스키마 적합성 검사 (--json 지원)
@@ -64,19 +88,59 @@ llmwiki config edit
 | 항목 | 필수 | 설명 | 예시 |
 |------|------|------|------|
 | `name` | 필수 | CLI에서 볼트를 구분하는 고유 식별자 | `personal`, `work` |
-| `path` | 필수 | 볼트가 저장된 로컬 경로 | `~/wikis/personal` |
+| `path` | 필수¹ | 볼트가 저장된 로컬 경로 | `~/wikis/personal` |
 | `kind` | 필수 | 일반 또는 보안 볼트 구분 | `open`, `secure` |
+| `backend` | 선택 | 저장 방식. 기본 `local` | `local`, `git` |
+| `origin` | 조건부 | git 백엔드의 원격 URL (git이면 필수) | `git@github.com:me/wiki.git` |
 | `signals` | 선택 | 요청을 이 볼트로 자동 연결할 주제·키워드. 쉼표로 구분 | `커리어, 이력서, LinkedIn` |
 | `notes` | 선택 | 에이전트가 라우팅할 때 참고할 용도·특이사항 | `커리어 자료 보유` |
+
+¹ git 백엔드는 `path`를 생략하면 `~/llmwiki-vaults/<name>`로 clone합니다.
 
 예를 들어 `signals`에 `커리어, 이력서`를 입력하면 사용자가 이력서 관련 요청을 했을 때 해당 볼트를 우선 후보로 판단합니다. 신호가 모호하거나 여러 볼트와 겹치면 에이전트가 사용자에게 대상 볼트를 확인합니다.
 
 사용자 레지스트리는 프로젝트나 npm 설치 디렉터리가 아닌 OS 표준 설정 위치에 저장됩니다.
 
-- macOS/Linux: `${XDG_CONFIG_HOME:-~/.config}/llm-wiki/wikis.local.md`
-- Windows: `%APPDATA%\\llm-wiki\\wikis.local.md`
+- `${XDG_CONFIG_HOME:-~/.config}/llm-wiki/wikis.local.md`
 
 `LLM_WIKI_CONFIG_HOME`으로 위치를 재정의할 수 있습니다. CLI로 등록한 볼트 경로는 어디에서 실행해도 동일하게 동작하도록 절대 경로로 저장됩니다.
+
+## 볼트 백엔드 (local / git)
+
+볼트를 저장하는 방식입니다. 기본은 `local`(이 머신의 폴더)이고, `git`을 쓰면 볼트가 git repo가 되어 여러 머신에서 같은 위키를 작업할 수 있습니다.
+
+```bash
+# git 백엔드 볼트 등록 — origin에서 clone (path 생략 시 ~/llmwiki-vaults/gwiki)
+llmwiki vault add --name gwiki --backend git --origin git@github.com:me/wiki.git
+
+# 작업 후 원격과 동기화: pull --rebase → 변경 있으면 commit → push
+llmwiki vault sync gwiki
+llmwiki vault sync gwiki --message "회의 노트 정리"   # 커밋 메시지 지정
+llmwiki vault sync gwiki --pull-only                  # 원격 변경만 당겨오기
+llmwiki vault sync gwiki --no-push                    # 커밋만, push는 나중에
+```
+
+- `vault sync`는 **git 백엔드 볼트만** 대상입니다(local 볼트는 안내 후 건너뜁니다).
+- "주기적"으로 돌리려면 cron/launchd에 `llmwiki vault sync <name>`을 예약하세요. llmwiki는 데몬을 띄우지 않습니다.
+- 다른 머신에서는 아래 `config import`로 git 볼트를 자동 clone해 바로 이어서 작업할 수 있습니다.
+- git이 설치돼 있어야 하며(선택 의존성), 인증은 시스템 git 설정(SSH 키·credential helper)을 그대로 씁니다.
+
+## 설정 export / import
+
+새 머신에서 빠르게 셋업하도록 설정을 JSON 번들로 옮깁니다. 범위는 **볼트 레지스트리 + 커스텀 스킬**입니다.
+
+```bash
+# 머신 A: 내보내기
+llmwiki config export --output ~/llmwiki-settings.json
+
+# 머신 B: 가져오기 (git 볼트는 자동 clone)
+llmwiki config import ~/llmwiki-settings.json --vaults-dir ~/llmwiki-vaults
+```
+
+- **토큰은 절대 포함되지 않습니다**(원격 provider 토큰은 env 전용). 에이전트 실행 명령 오버라이드도 머신마다 다르므로 제외됩니다.
+- **git 볼트**는 origin으로 자동 clone한 뒤 레지스트리에 등록합니다.
+- **local 볼트**는 경로가 머신마다 달라 자동 등록하지 않고, 목록으로 알려줍니다(수동으로 `vault add`).
+- 기존 스킬은 덮어쓰지 않고 건너뜁니다. 덮어쓰려면 `--force`.
 
 ## 어디서든 시작
 
@@ -100,26 +164,17 @@ llmwiki claude --model sonnet
 llmwiki start codex -- --model gpt-5
 ```
 
-CLI는 사용자 데이터 디렉터리에 관리형 실행 워크스페이스를 준비하고 레지스트리를 동기화한 뒤 에이전트를 실행합니다. 따라서 현재 디렉터리와 관계없이 동일한 라우팅 지침과 설정으로 시작됩니다.
+CLI는 관리형 워크스페이스를 준비한 뒤 에이전트를 실행하므로, 현재 디렉터리와 관계없이 동일한 라우팅 지침으로 시작됩니다. 워크스페이스 동작 상세는 `WORKSPACE.md`를 참고하세요.
 
-워크스페이스에서 매 실행마다 갱신되는 항목은 라우팅 지침 문서(`AGENTS.md`, `CLAUDE.md`, `WIKI-CLI.md`, `wikis.example.md`), `wikis.local.md`, 생성된 스킬 카탈로그 `SKILLS.md`, `.claude/commands/`, `.claude/skills/`입니다. 그 이외의 파일은 그대로 유지되므로 `.claude/settings.local.json`에 쌓인 Claude Code 권한 승인을 매번 다시 하지 않아도 됩니다. 자세한 설명은 워크스페이스의 `WORKSPACE.md`에 있습니다.
-
-### 컨텍스트에 무엇이 언제 로드되나
-
-이름이 같은 `CLAUDE.md`가 세 개 있어 헷갈리기 쉽습니다. 역할과 로드 시점이 각각 다릅니다.
+### 컨텍스트 로드
 
 | 파일 | 위치 | 로드 시점 |
 |------|------|-----------|
-| **라우터** `CLAUDE.md` | 워크스페이스 (실행 위치) | `llmwiki` 시작 즉시 자동 로드 |
-| **볼트** `CLAUDE.md` | 각 볼트 안 | 볼트로 라우팅된 뒤 에이전트가 직접 읽음 |
-| **템플릿** `CLAUDE.md` | 패키지 `templates/vault/` | 런타임에 로드되지 않음 (`vault scaffold` 복사 원본) |
+| **라우터** `CLAUDE.md` | 워크스페이스 | `llmwiki` 시작 시 |
+| **볼트** `CLAUDE.md` | 각 볼트 | 해당 볼트로 라우팅된 뒤 |
+| **템플릿** `CLAUDE.md` | `templates/vault/` | 런타임 미로드 (`vault scaffold` 원본) |
 
-로드 흐름은 순차적입니다.
-
-1. **시작 직후** — `llmwiki`는 볼트가 아니라 워크스페이스에서 에이전트를 띄웁니다. 이때 컨텍스트에는 **라우터 `CLAUDE.md`만** 올라옵니다. 이 문서는 `WIKI-CLI.md`(라우팅 규칙)와 `wikis.local.md`(볼트 목록)를 가리켜, "어느 볼트로 보낼지"를 판단하는 역할만 합니다. 등록된 볼트는 `vaults/<name>` 심볼릭 링크와 `--add-dir`로 **접근만 가능**할 뿐, 아직 규칙이 로드되지는 않습니다.
-2. **볼트로 라우팅된 뒤** — `/wiki-add` 같은 요청으로 대상 볼트가 정해지면 에이전트가 그 볼트로 이동해 볼트 `CLAUDE.md`를 읽어 들입니다. 이때부터 컨텍스트에는 **라우터 + 볼트 `CLAUDE.md`가 함께** 존재합니다. 라우터는 교통정리(어느 볼트·보안 게이트), 볼트는 실제 위키 워크플로우를 담당하며 역할이 겹치지 않습니다.
-
-즉 처음부터 둘 다 로드되는 것이 아니라, 시작 시엔 라우터 하나, 볼트로 들어간 뒤 볼트 것이 추가되는 구조입니다. 서로 다른 볼트의 `CLAUDE.md`가 동시에 로드되지는 않습니다.
+시작 시에는 라우터 `CLAUDE.md`만 로드되고, 대상 볼트가 정해진 뒤에 볼트 `CLAUDE.md`가 추가됩니다.
 
 ## 명령
 
@@ -129,14 +184,23 @@ CLI는 사용자 데이터 디렉터리에 관리형 실행 워크스페이스�
 |------|------|
 | `llmwiki setup` | 사용자 설정 초기화 |
 | `llmwiki vault add/list/show/remove` | 볼트 등록 및 상태 관리 (`list --json` 지원) |
-| `llmwiki vault lint [name]` | 볼트가 위키 스키마를 지키는지 검사 (`--json` 지원, CI 친화) |
+| `llmwiki vault lint [name]` | 볼트가 위키 스키마를 지키는지 검사 (`--json` 지원) |
 | `llmwiki vault scaffold [name]` | 위키 스키마 구조를 생성·보완 (기존 파일은 덮어쓰지 않음) |
+| `llmwiki vault sync [name]` | git 백엔드 볼트를 원격과 동기화 (pull→commit→push) |
 | `llmwiki skill add/list/show/edit/remove` | 커스텀 스킬 관리 (`list --json` 지원) |
 | `llmwiki skill templates` | 내장 스킬 템플릿 목록 |
 | `llmwiki skill path [name]` | 스킬 원본 경로 출력 |
-| `llmwiki doctor` | 설정 파일, 레지스트리 파싱 오류(줄 번호), 볼트 경로, 필수 문서, 에이전트 설치 진단 |
+| `llmwiki doctor` | 설정·볼트·에이전트 진단 |
 | `llmwiki config path/edit` | 설정 위치 확인 및 직접 편집 |
+| `llmwiki config export/import` | 설정(볼트·스킬)을 JSON 번들로 내보내기/가져오기 |
 | `llmwiki [claude\|codex]` | 통합 라우터 시작 |
+| `llmwiki new <입력>` | 에이전트를 띄워 URL/파일/텍스트를 ingest |
+| `llmwiki capture [options]` | 자유 텍스트 메모를 볼트 `raw/notes/`에 저장 |
+| `llmwiki publish [vault] [--dry-run]` | 로컬 위키를 원격(provider)으로 단방향 발행 (view) |
+| `llmwiki publish add/list/remove` | 발행 설정을 관리 (볼트와 분리, 전역 `publish.json`) |
+| `llmwiki connection add/list/remove` | 원격 provider 토큰을 이름 붙여 관리 (워크스페이스별 연결, `secrets.json`) |
+| `llmwiki publish view [vault]` | 대상 DB에 뷰 탭(Table/Board/Gallery/List) 강제 재생성 (평소엔 첫 발행 때 자동) |
+| `llmwiki inbox pull [vault] [--dry-run]` | 원격(provider) inbox의 새 항목을 가져옴 |
 
 ### 에이전트 내부 명령 (라우터 세션 안에서 실행)
 
@@ -187,17 +251,120 @@ llmwiki skill edit linkedin-draft
 llmwiki skill remove linkedin-draft
 ```
 
-스킬 원본은 설정 디렉터리의 `skills/<name>/SKILL.md`에 보관되며(`llmwiki skill path`), 다음 실행 시 워크스페이스로 동기화됩니다. 이때 다음 항목이 자동 생성됩니다.
+스킬 원본은 설정 디렉터리의 `skills/<name>/SKILL.md`에 보관되며(`llmwiki skill path`), 다음 실행 시 워크스페이스로 동기화됩니다.
 
 | 생성 대상 | 용도 |
 |-----------|------|
-| `.claude/skills/<name>/` | 스킬 정본 사본 (Claude Code skill) |
+| `.claude/skills/<name>/` | Claude Code skill |
 | `.claude/commands/<name>.md` | Claude Code 슬래시 명령 (`/<name>`) |
-| `SKILLS.md` | Codex가 읽는 스킬 카탈로그 |
+| `SKILLS.md` | Codex 스킬 카탈로그 |
 
-이전 버전의 `linkedin-draft` 명령은 내장 명령에서 빠지고 내장 템플릿으로 이동했습니다. 계속 쓰려면 `llmwiki skill add linkedin-draft --template linkedin-draft`로 한 번 등록하세요.
+`SKILL.md` 프론트매터에는 `name`과 `description`이 필요합니다. `description`에는 트리거 발화 예시를 넣는 것이 좋습니다. 스킬 이름은 내장 명령(`wiki-add`, `wiki-search`, `wiki-use`)과 중복할 수 없습니다.
 
-`SKILL.md` 프론트매터에는 `name`과 `description`이 필요합니다. `description`은 에이전트가 "언제 이 스킬을 쓸지" 판단하는 기준이므로 트리거가 되는 발화 예시를 포함하는 것이 좋습니다. 누락된 항목은 `llmwiki doctor`가 보고합니다. 스킬 이름은 내장 명령(`wiki-add`, `wiki-search`, `wiki-use`)과 중복할 수 없습니다.
+## 입력 소스
+
+새 정보를 볼트로 받아오는 창구입니다.
+
+```bash
+llmwiki new https://arxiv.org/abs/2501.12345   # 에이전트를 띄워 ingest 시작
+echo "회의에서 나온 아이디어" | llmwiki capture --vault personal --title "아이디어"
+llmwiki inbox pull personal --dry-run           # Notion inbox 새 항목 미리보기
+```
+
+- **`new`** 는 에이전트 세션을 열고 그 안에서 `wiki-add` 워크플로우를 시작하는 shortcut입니다. 분류·라우팅은 에이전트가 판단합니다.
+- **`capture`** 는 결정론적으로 메모를 `raw/notes/`에 저장합니다(타임스탬프 파일명). TTY에서는 프롬프트로, 파이프에서는 stdin으로 본문을 받습니다. 저장 후 바로 ingest할지 물어봅니다.
+- **`inbox pull`** 은 원격 inbox의 새 항목을 `raw/notes/`로 가져오고, 이미 가져온 항목은 `_meta/remote-inbox.json`으로 중복을 막습니다.
+
+> `new`·`capture`는 로컬 전용이고, `inbox pull`은 원격 provider 설정이 필요합니다.
+
+## 원격 발행/수집 (publish · inbox)
+
+로컬에서 작업한 위키를 원격 저장소에 **단방향(local→원격)** 으로 발행하고(`publish`), 원격 inbox에서 새 정보를 가져옵니다(`inbox pull`). 원격 대상은 **provider**로 추상화되어 있으며, 현재 Notion을 지원합니다.
+
+발행 설정은 볼트와 분리돼 있어 `publish add`로 따로 연결합니다(볼트 추가와 독립). 토큰은 **이름 붙인 연결(named connection)** 로 저장하므로, 같은 provider라도 워크스페이스(계정)가 여러 개면 각각 이름을 붙여 두고 볼트마다 골라 쓸 수 있습니다. 대화형(TTY) `publish add`는 저장된 연결이 있으면 **그중에서 고르거나 새로 추가**하고, 이어서 **대상 데이터베이스를 새로 만들지 / 기존 것을 쓸지** 물어봅니다. 저장 전에 provider API로 검증(토큰 유효성 + 대상 DB)한 뒤, 토큰은 설정 디렉터리 `secrets.json`(`0600`)에 연결로, 대상 설정은 전역 `publish.json`에(어떤 연결을 쓰는지 이름과 함께) 기록합니다.
+
+```bash
+# 볼트는 발행과 무관하게 먼저 등록
+llmwiki vault add --name personal --path ~/wikis/personal
+
+# (선택) 토큰을 이름 붙여 미리 저장 — 워크스페이스별로 여러 개 가능
+llmwiki connection add --remote notion --name personal --remote-token secret_xxx
+llmwiki connection list              # 저장된 연결과 이를 쓰는 볼트 확인
+llmwiki connection remove personal   # 저장된 연결(토큰) 삭제 — 쓰는 볼트가 있으면 경고 후 확인
+
+# 발행 설정 연결 — 대화형: 연결 선택(또는 새 토큰) → publish/inbox 대상 선택
+#   · "새 데이터베이스 생성" → 부모 페이지를 고르면 스키마까지 갖춰 만들어 줌
+#   · "기존 데이터베이스 사용" → 접근 가능한 DB 목록에서 선택 (스키마가 다르면 누락 속성 추가 여부를 물음)
+llmwiki publish add personal
+
+# 비대화형(CI 등)은 플래그로 연결·DB id를 직접 지정
+#   · --connection <name>으로 저장된 연결 재사용, 없으면 --remote-token으로 새로 저장
+#     (--connection 생략 시 연결 이름은 볼트 이름으로 기본 지정)
+llmwiki publish add personal \
+  --remote notion --connection personal --remote-token secret_xxx --publish-db <db-id> --inbox-db <inbox-db-id>
+
+llmwiki publish list                 # 등록된 발행 설정 확인 (연결 이름 포함)
+llmwiki publish personal --dry-run   # diff 미리보기 (토큰 없이도 가능)
+llmwiki publish personal             # 없는/바뀐 페이지만 push (저장된 연결 토큰 사용)
+llmwiki publish remove personal      # 발행 설정만 삭제 — 그 연결을 쓰는 볼트가 더 없으면(고아) 토큰도 지울지 물어봄
+                                     #   (--purge-token/--keep-token으로 강제, 공유 연결은 안 지움)
+```
+
+- 발행 설정은 전역 config의 `publish.json`에 볼트 이름을 키로 둡니다(토큰 제외). `provider`가 원격 대상을, `connection`이 secrets store의 어떤 연결(토큰)을 쓸지 결정합니다:
+  ```json
+  {
+    "version": 1,
+    "vaults": {
+      "personal": {
+        "provider": "notion",
+        "connection": "personal",
+        "publish": { "databaseId": "…", "syncedSubdirs": ["wiki/entities", "wiki/concepts", "wiki/sources", "wiki/analyses"] },
+        "inbox": { "databaseId": "…" },
+        "allowPublish": false
+      }
+    }
+  }
+  ```
+- **설정=전역, 상태=볼트.** 어디로·무엇을 발행할지는 볼트 밖 `publish.json`에서 관리하고, 발행 상태(`_meta/remote-map.json`)만 볼트에 남겨 git 볼트와 함께 이동하게 합니다(여러 머신에서 중복 발행 방지).
+- **토큰은 env 또는 설정 디렉터리 `secrets.json`의 named connection에만** 둡니다(레지스트리·git·`publish.json` 저장 금지). `secrets.json`은 `0600`이며 `.gitignore`·`config export`에서 제외됩니다. 조회 순서: `publish.json` 엔트리의 `tokenEnv`(env) → `LLMWIKI_<PROVIDER>_TOKEN_<VAULT>`(env) → `LLMWIKI_<PROVIDER>_TOKEN`(env) → `secrets.json`의 연결(`publish.json`의 `connection` 이름). env가 store보다 우선이라 CI·스크립트에서 저장 토큰을 덮어쓸 수 있습니다. **하나의 연결을 여러 볼트가 공유**할 수 있으므로 `publish remove`는 설정만 해제하고, 그 볼트를 지운 뒤 해당 연결을 쓰는 볼트가 하나도 안 남을 때만(고아 연결) 토큰도 지울지 물어봅니다(`--purge-token`/`--keep-token`으로 강제, 비대화형은 유지). 아직 다른 볼트가 쓰는 공유 연결은 지우지 않습니다 — 그런 토큰은 `connection remove`로만 지웁니다.
+- v1(`notion:<VAULT>` / 공용 `notion:*`) 토큰은 처음 읽을 때 자동으로 연결로 마이그레이션됩니다(`notion:*` → `default`, `notion:<VAULT>` → 소문자 볼트 키). 연결 이름이 없는 기존 `publish.json` 엔트리도 같은 규칙으로 해소돼 재설정 없이 그대로 동작합니다.
+- 발행 상태는 `_meta/remote-map.json`에 슬러그별 `remoteId`·콘텐츠 해시로 기록합니다. 해시가 바뀐 페이지만 갱신하고, 원격→local 역방향이나 원격 페이지 삭제는 하지 않습니다.
+- `kind: secure` 볼트는 `publish.json` 엔트리에 `"allowPublish": true`가 있어야 하고(`publish add --allow-publish`), push 전 확인·익명화 게이트를 거칩니다.
+- Notion provider는 `@notionhq/client` 5.x가 필요합니다(선택 의존성): `npm i @notionhq/client`. 발행·inbox는 하위 버전도 되지만 `publish view`(뷰 자동 생성)는 5.x의 Views API가 필요합니다.
+
+#### Notion 데이터베이스 속성과 뷰
+
+각 위키 페이지는 대상 DB의 **한 행(page)**으로 발행되고, frontmatter는 아래 속성으로 매핑됩니다. `publish add`에서 **"새 데이터베이스 생성"** 을 고르면 이 컬럼을 갖춰 만들어 주고, **"기존 데이터베이스 사용"** 시 누락 컬럼이 있으면 추가할지 물어봅니다(직접 만든 DB라면 아래 컬럼이 있어야 값이 채워지고, 없는 컬럼은 무시됨).
+
+| frontmatter | Notion 속성 | 타입 |
+|---|---|---|
+| `title` | `Name`(또는 `titleProperty`) | Title |
+| `type` | `Type` | Select (entity/concept/source/analysis) |
+| `status` | `Status` | Select (active/draft/archived) |
+| `tags` | `Tags` | Multi-select |
+| `summary` | `Summary` | Text |
+| `confidence` | `Confidence` | Select (low/medium/high) |
+| `created` / `updated` | `Created` / `Updated` | Date |
+| `source_url` | `Source URL` | URL |
+
+발행되는 각 행에는 `type`별 아이콘(🏢 entity · 🧩 concept · 📄 source · 🔍 analysis, 그 외 📝)이 자동으로 붙어 Board·Gallery 카드에서 한눈에 구분됩니다.
+
+통짜 표를 벗어나도록, **첫 발행 때 대상 DB에 뷰 탭이 자동으로 생성됩니다**(`@notionhq/client` 5.x 필요). 이미 만들었는지는 `_meta/remote-map.json`의 플래그로 추적해 탭이 중복되지 않으며, 이후 발행에선 건너뜁니다.
+
+- **All** (Table) — `Updated` 내림차순 정본 뷰.
+- **By Type** (Board) — `Type`으로 그룹핑해 entity/concept/source/analysis 네 축을 한눈에.
+- **Gallery** — 아이콘이 크게 보이는 카드 뷰.
+- **Recent** (List) — `Updated` 최신순 "최근 작업" 뷰.
+
+발행은 단방향이라 Notion에서 뷰를 손보거나 탭 순서를 바꿔도 로컬·발행 로직에 영향이 없습니다. 뷰를 지웠다가 다시 만들고 싶으면 `llmwiki publish view <vault>`로 강제 재생성합니다(중복 방지를 하지 않으니 필요할 때만).
+
+```bash
+llmwiki publish view personal        # 뷰 탭 강제 재생성 (평소엔 첫 발행 때 자동)
+```
+
+### 새 provider 추가
+
+원격 대상을 늘리려면 `src/providers/<name>.js`에 provider 인터페이스(`createClient`, 출력용 `createRemotePage`/`updateRemotePage`, 입력용 `listInboxItems`/`itemId`/`fetchInboxNote`)를 구현하고 `src/providers/index.js` 레지스트리에 한 줄 등록합니다. `sync`/`inbox` 오케스트레이터와 diff·상태 로직은 provider-중립이라 그대로 재사용됩니다. 볼트는 `publish.json` 엔트리의 `provider` 값만 바꾸면 됩니다.
 
 ## 설계 원칙
 
