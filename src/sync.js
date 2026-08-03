@@ -9,7 +9,9 @@ const STATUS_DEFAULT = 'active';
 
 // local → 원격 단방향 동기화. diff를 떠 없는/바뀐 페이지만 push한다. 절대 원격→local 안 함.
 // 실제 원격 호출(페이지 생성·갱신)은 provider가 담당하고, 이 모듈은 스캔·diff·상태 기록만 한다.
-// 상태는 <vault>/_meta/remote-map.json에 DB별·슬러그별로 기록한다(git 커밋 대상, provider-중립).
+// 상태는 <vault>/_meta/remote-map.json에 DB별·슬러그별로 기록한다(provider-중립). 이 파일은
+// git으로 볼트를 따라 이동해 머신·클론 간에 dedup 상태를 공유해야 한다(커밋 안 되면 클론·경로
+// 이동 때 유실돼 빈 맵에서 전체가 재발행된다). git 백엔드에선 publish가 커밋 여부를 묻는다.
 
 export const REMOTE_MAP_FILE = path.join('_meta', 'remote-map.json');
 

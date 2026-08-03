@@ -116,6 +116,23 @@ export function gitAddCommit(dir, message) {
   return { ok: true, committed: true };
 }
 
+// 한 파일에 커밋할 변경(수정·추가·untracked)이 있는지. relFile은 저장소 루트 기준 상대 경로.
+export function fileHasChanges(dir, relFile) {
+  const result = git(['status', '--porcelain', '--', relFile], { cwd: dir });
+  return result.ok && result.stdout.length > 0;
+}
+
+/**
+ * 한 파일만 스테이징해 커밋한다(경로 한정이라 작업 트리의 다른 변경은 건드리지 않는다).
+ * 변경이 없으면 커밋하지 않고 { ok, committed: false }. relFile은 저장소 루트 기준 상대 경로.
+ */
+export function gitCommitFile(dir, relFile, message) {
+  if (!fileHasChanges(dir, relFile)) return { ok: true, committed: false };
+  gitOrThrow(['add', '--', relFile], { cwd: dir, action: 'add' });
+  gitOrThrow(['commit', '-m', message, '--', relFile], { cwd: dir, action: 'commit' });
+  return { ok: true, committed: true };
+}
+
 // push한다. upstream이 아직 없으면(빈 원격에서 clone한 첫 push) -u origin HEAD로 설정한다.
 export function gitPush(dir) {
   if (!hasUpstream(dir)) return gitOrThrow(['push', '-u', 'origin', 'HEAD'], { cwd: dir, action: 'push' });

@@ -595,8 +595,24 @@ test('reset wipes config but preserves registered vault files by default', async
   assert.equal(fs.existsSync(paths.secrets), false);
   assert.equal(fs.existsSync(paths.skillsDir), false);
   assert.equal(fs.existsSync(paths.workspace), false);
+  // addConnection이 만든 secrets.json 무시 규칙만 있던 .gitignore는 함께 정리된다.
+  assert.equal(fs.existsSync(path.join(paths.configDir, '.gitignore')), false);
   // 볼트 실제 파일은 보존된다.
   assert.equal(fs.existsSync(vaultFile), true);
+});
+
+test('reset prunes only the secrets.json rule and keeps user-authored .gitignore rules', async () => {
+  const paths = tmpPaths();
+  // 토큰 저장이 secrets.json 무시 규칙을 넣는다. 사용자가 별도 규칙도 넣어뒀다고 가정한다.
+  addConnection(paths.secrets, 'notion', 'work', { token: 'secret_w' });
+  const gitignore = path.join(paths.configDir, '.gitignore');
+  fs.appendFileSync(gitignore, 'my-notes.txt\n');
+
+  await resetConfig(paths, ['--force']);
+  // 파일은 남되 secrets.json 규칙만 사라지고 사용자 규칙은 보존된다.
+  assert.equal(fs.existsSync(gitignore), true);
+  const rules = fs.readFileSync(gitignore, 'utf8').split(/\r?\n/).filter(Boolean);
+  assert.deepEqual(rules, ['my-notes.txt']);
 });
 
 test('reset --purge-vaults also deletes the registered vault directory', async () => {

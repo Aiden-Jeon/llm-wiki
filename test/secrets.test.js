@@ -7,6 +7,7 @@ import {
   addConnection,
   connectionKey,
   ensureSecretsGitignore,
+  pruneSecretsGitignore,
   getConnection,
   getConnectionToken,
   hasConnection,
@@ -96,4 +97,27 @@ test('ensureSecretsGitignore is idempotent and preserves existing lines', () => 
   const content = fs.readFileSync(path.join(dir, '.gitignore'), 'utf8');
   assert.match(content, /node_modules/);
   assert.equal((content.match(/^secrets\.json$/gm) || []).length, 1);
+});
+
+test('pruneSecretsGitignore removes only the secrets.json rule and keeps others', () => {
+  const dir = tmpDir();
+  fs.writeFileSync(path.join(dir, '.gitignore'), 'node_modules\nsecrets.json\ncache/\n');
+  assert.equal(pruneSecretsGitignore(dir), true);
+  const content = fs.readFileSync(path.join(dir, '.gitignore'), 'utf8');
+  assert.equal(content, 'node_modules\ncache/\n');
+});
+
+test('pruneSecretsGitignore deletes a .gitignore that held only the secrets.json rule', () => {
+  const dir = tmpDir();
+  ensureSecretsGitignore(dir); // secrets.json만 담긴 파일 생성
+  assert.equal(pruneSecretsGitignore(dir), true);
+  assert.equal(fs.existsSync(path.join(dir, '.gitignore')), false);
+});
+
+test('pruneSecretsGitignore is a no-op when the file or rule is absent', () => {
+  const dir = tmpDir();
+  assert.equal(pruneSecretsGitignore(dir), false); // 파일 없음
+  fs.writeFileSync(path.join(dir, '.gitignore'), 'node_modules\n');
+  assert.equal(pruneSecretsGitignore(dir), false); // 규칙 없음
+  assert.equal(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8'), 'node_modules\n');
 });

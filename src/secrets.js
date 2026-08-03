@@ -91,6 +91,27 @@ export function ensureSecretsGitignore(configDir) {
   } catch { /* .gitignore 갱신 실패가 토큰 저장을 막지 않게 한다. */ }
 }
 
+/**
+ * .gitignore에서 secrets.json 무시 규칙만 제거한다(ensureSecretsGitignore의 역연산).
+ * 사용자가 직접 추가한 다른 규칙은 보존하고, 남는 줄이 없으면 파일 자체를 지운다.
+ * 반환: 무언가 바꿨으면 true. 파일이 없거나 해당 규칙이 없으면 false(멱등).
+ */
+export function pruneSecretsGitignore(configDir) {
+  const file = path.join(configDir, '.gitignore');
+  if (!fs.existsSync(file)) return false;
+  const line = 'secrets.json';
+  const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
+  const kept = lines.filter((row) => row.trim() !== line);
+  if (kept.length === lines.length) return false; // 해당 규칙 없음
+  // 실질 내용(빈 줄 제외)이 남지 않으면 우리가 만든 파일로 보고 지운다.
+  if (kept.every((row) => !row.trim())) {
+    fs.rmSync(file, { force: true });
+  } else {
+    fs.writeFileSync(file, `${kept.join('\n').replace(/\n+$/, '')}\n`);
+  }
+  return true;
+}
+
 /** store를 0600으로 저장하고(디렉터리 0700) .gitignore를 보강한다. */
 export function writeSecrets(secretsPath, data) {
   const dir = path.dirname(secretsPath);
