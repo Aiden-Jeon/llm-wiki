@@ -43,6 +43,8 @@ llmwiki vault list
 llmwiki vault list --json     # 스크립트/CI용 기계 판독 출력
 llmwiki vault show personal
 llmwiki vault remove personal
+llmwiki vault lint personal   # 위키 스키마 적합성 검사 (--json 지원)
+llmwiki vault scaffold personal   # 누락된 스키마 구조 생성 (기존 파일 보존)
 llmwiki doctor
 llmwiki config path
 llmwiki config edit
@@ -102,6 +104,23 @@ CLI는 사용자 데이터 디렉터리에 관리형 실행 워크스페이스�
 
 워크스페이스에서 매 실행마다 갱신되는 항목은 라우팅 지침 문서(`AGENTS.md`, `CLAUDE.md`, `WIKI-CLI.md`, `wikis.example.md`), `wikis.local.md`, 생성된 스킬 카탈로그 `SKILLS.md`, `.claude/commands/`, `.claude/skills/`입니다. 그 이외의 파일은 그대로 유지되므로 `.claude/settings.local.json`에 쌓인 Claude Code 권한 승인을 매번 다시 하지 않아도 됩니다. 자세한 설명은 워크스페이스의 `WORKSPACE.md`에 있습니다.
 
+### 컨텍스트에 무엇이 언제 로드되나
+
+이름이 같은 `CLAUDE.md`가 세 개 있어 헷갈리기 쉽습니다. 역할과 로드 시점이 각각 다릅니다.
+
+| 파일 | 위치 | 로드 시점 |
+|------|------|-----------|
+| **라우터** `CLAUDE.md` | 워크스페이스 (실행 위치) | `llmwiki` 시작 즉시 자동 로드 |
+| **볼트** `CLAUDE.md` | 각 볼트 안 | 볼트로 라우팅된 뒤 에이전트가 직접 읽음 |
+| **템플릿** `CLAUDE.md` | 패키지 `templates/vault/` | 런타임에 로드되지 않음 (`vault scaffold` 복사 원본) |
+
+로드 흐름은 순차적입니다.
+
+1. **시작 직후** — `llmwiki`는 볼트가 아니라 워크스페이스에서 에이전트를 띄웁니다. 이때 컨텍스트에는 **라우터 `CLAUDE.md`만** 올라옵니다. 이 문서는 `WIKI-CLI.md`(라우팅 규칙)와 `wikis.local.md`(볼트 목록)를 가리켜, "어느 볼트로 보낼지"를 판단하는 역할만 합니다. 등록된 볼트는 `vaults/<name>` 심볼릭 링크와 `--add-dir`로 **접근만 가능**할 뿐, 아직 규칙이 로드되지는 않습니다.
+2. **볼트로 라우팅된 뒤** — `/wiki-add` 같은 요청으로 대상 볼트가 정해지면 에이전트가 그 볼트로 이동해 볼트 `CLAUDE.md`를 읽어 들입니다. 이때부터 컨텍스트에는 **라우터 + 볼트 `CLAUDE.md`가 함께** 존재합니다. 라우터는 교통정리(어느 볼트·보안 게이트), 볼트는 실제 위키 워크플로우를 담당하며 역할이 겹치지 않습니다.
+
+즉 처음부터 둘 다 로드되는 것이 아니라, 시작 시엔 라우터 하나, 볼트로 들어간 뒤 볼트 것이 추가되는 구조입니다. 서로 다른 볼트의 `CLAUDE.md`가 동시에 로드되지는 않습니다.
+
 ## 명령
 
 ### 셸 명령 (터미널에서 실행)
@@ -110,6 +129,8 @@ CLI는 사용자 데이터 디렉터리에 관리형 실행 워크스페이스�
 |------|------|
 | `llmwiki setup` | 사용자 설정 초기화 |
 | `llmwiki vault add/list/show/remove` | 볼트 등록 및 상태 관리 (`list --json` 지원) |
+| `llmwiki vault lint [name]` | 볼트가 위키 스키마를 지키는지 검사 (`--json` 지원, CI 친화) |
+| `llmwiki vault scaffold [name]` | 위키 스키마 구조를 생성·보완 (기존 파일은 덮어쓰지 않음) |
 | `llmwiki skill add/list/show/edit/remove` | 커스텀 스킬 관리 (`list --json` 지원) |
 | `llmwiki skill templates` | 내장 스킬 템플릿 목록 |
 | `llmwiki skill path [name]` | 스킬 원본 경로 출력 |
@@ -126,6 +147,7 @@ CLI는 사용자 데이터 디렉터리에 관리형 실행 워크스페이스�
 | wiki-add | `/wiki-add <입력>` | `wiki-add <입력>` | 지식을 적절한 볼트에 추가(ingest) |
 | wiki-search | `/wiki-search <질의>` | `wiki-search <질의>` | 모든 볼트를 가로질러 검색 |
 | wiki-use | `/wiki-use <질문>` | `wiki-use <질문>` | 기존 지식으로 답하거나 새 분석 생성 |
+| wiki-lint | `/wiki-lint [볼트]` | `wiki-lint [볼트]` | 스키마 적합성 평가 후 수정 권고·적용 |
 | 커스텀 스킬 | `/<skill>` | `<skill>` | `llmwiki skill`로 등록한 사용자 정의 작업 |
 
 입력값으로 URL, 로컬 파일 경로, Notion URL, 자유 텍스트를 모두 넘길 수 있습니다.
@@ -187,6 +209,15 @@ llmwiki skill remove linkedin-draft
 ## 볼트 요구사항
 
 각 볼트는 최소한 자체 `CLAUDE.md`(위키 스키마와 워크플로우) 및 `index.md`를 가지는 것을 권장합니다. Codex 전용 지침이 필요하면 `AGENTS.md`를 추가할 수 있습니다. `secure` 볼트는 보안 원칙을 명시해야 합니다.
+
+표준 위키 스키마(3계층 `raw/` → `wiki/{entities,concepts,sources,analyses}` → `_meta/`, frontmatter·태그통제·index/log 규약)의 정본은 `templates/vault/`에 있습니다. 새 볼트는 `llmwiki vault scaffold <name>`으로 이 골격을 생성하고, `llmwiki vault lint <name>`으로 적합성을 검사할 수 있습니다. 기계 검사 계약은 각 볼트의 `_meta/schema.md`에 명문화되어 있습니다.
+
+### 스키마 정본을 어디서 고치나
+
+- **표준 스키마 정본**은 설치된 CLI 패키지의 `templates/vault/`입니다. 스키마 규칙 자체(디렉터리 골격, `CLAUDE.md` 워크플로우, `_meta/schema.md` 검사 계약)를 바꾸려면 이 패키지 파일을 수정합니다. 볼트마다 복사된 사본을 고치는 것이 아닙니다.
+- `_meta/schema.md`의 검사 계약과 결정론 린터(`src/lint.js`)는 같은 규칙을 담습니다. **규칙을 바꾸면 두 곳을 함께 수정**해야 드리프트가 나지 않습니다.
+- `vault scaffold`는 템플릿을 볼트로 **복사**할 뿐이며, **이미 있는 파일은 절대 덮어쓰지 않습니다**. 따라서 템플릿을 수정해도 기존 볼트의 사본은 그대로 유지되고, 새로 만드는 볼트(또는 아직 없던 파일)에만 반영됩니다.
+- 개별 볼트 안에서는 그 볼트의 `CLAUDE.md`가 정본입니다(`설계 원칙 · 볼트가 정본`). 특정 볼트만 규칙을 달리하려면 그 볼트의 파일을 직접 조정하고, 모든 볼트에 적용할 표준을 바꾸려면 패키지 템플릿을 고칩니다.
 
 ## 개발
 

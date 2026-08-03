@@ -13,6 +13,7 @@ Codex가 이 CLI에서 직접 실행될 때 다음 태스크를 지원한다. �
 - **wiki-add** — 지식 추가(ingest). `WIKI-CLI.md § wiki-add`.
 - **wiki-search** — 크로스볼트 검색. `WIKI-CLI.md § wiki-search`.
 - **wiki-use** — 기존 지식 활용. `WIKI-CLI.md § wiki-use`.
+- **wiki-lint** — 스키마 적합성 평가·수정. `WIKI-CLI.md § wiki-lint` (`llmwiki vault lint`/`scaffold` 활용).
 
 사용자가 등록한 **커스텀 스킬**은 `SKILLS.md` 카탈로그에 있다. 그 이름으로 호출되면 `.claude/skills/<name>/SKILL.md`를 정본으로 삼아 실행하고, 생성·수정·삭제 요잭은 `llmwiki skill add|edit|remove`로 안내한다. 상세는 `WIKI-CLI.md § 커스텀 스킬`.
 

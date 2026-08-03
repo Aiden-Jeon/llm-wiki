@@ -21,6 +21,7 @@ export function getPaths(env = process.env, platform = process.platform) {
     registry: path.join(configBase, 'wikis.local.md'),
     skillsDir: path.join(configBase, 'skills'),
     templatesDir: path.join(packageRoot, 'templates', 'skills'),
+    vaultTemplateDir: path.join(packageRoot, 'templates', 'vault'),
     workspace: path.join(dataBase, 'workspace'),
   };
 }
