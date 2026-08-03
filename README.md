@@ -50,13 +50,20 @@ npm link
 # 설정 파일 생성 + 대화형 볼트 등록
 llmwiki setup
 
-# 비대화형 등록
+# 비대화형 등록 (로컬 폴더 볼트)
 llmwiki vault add \
   --name personal \
   --path ~/wikis/personal \
   --kind open \
   --signals "커리어,AI,논문" \
   --notes "커리어 자료 보유"
+
+# git 백엔드 볼트 등록 — origin에서 clone (path 생략 시 ~/llmwiki-vaults/<name>)
+llmwiki vault add \
+  --name work \
+  --backend git \
+  --origin git@github.com:me/work-wiki.git \
+  --kind secure
 
 llmwiki vault list
 llmwiki vault list --json
