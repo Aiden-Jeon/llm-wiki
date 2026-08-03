@@ -4,7 +4,7 @@ import { normalizeVault, readRegistry, writeRegistry } from './registry.js';
 import { listSkills, skillDir, validateSkillName } from './skills.js';
 
 // 사용자 설정을 머신 간에 옮기기 위한 JSON 번들 export/import.
-// 범위: 볼트 레지스트리 + 커스텀 스킬. 토큰(env 전용)과 에이전트 오버라이드(머신별)는 제외한다.
+// 범위: 볼트 레지스트리 + 커스텀 스킬. env/secrets.json 토큰과 에이전트 오버라이드(머신별)는 제외한다.
 // 스킬 파일은 번들에 인라인한다(텍스트=utf8, 그 외=base64). zero-dep(tar/zip 안 씀).
 
 export const BUNDLE_VERSION = 1;
@@ -87,17 +87,34 @@ function restoreSkill(skillsDir, skill, { force }) {
   const name = validateSkillName(skill.name);
   const dir = skillDir(skillsDir, name);
   if (fs.existsSync(dir) && !force) return { name, skipped: true };
-  fs.rmSync(dir, { recursive: true, force: true });
-  fs.mkdirSync(dir, { recursive: true });
-  for (const f of skill.files || []) {
-    const dest = path.join(dir, f.path);
-    // path traversal 방지: dest가 반드시 dir 안이어야 한다.
-    if (!path.resolve(dest).startsWith(path.resolve(dir) + path.sep)) {
+
+  // 기존 스킬을 지우기 전에 번들 전체를 검증하고 임시 디렉터리에 완성한다.
+  // 잘못된 후반 파일 때문에 기존 스킬이 사라지거나 부분 복원 상태가 남는 것을 막는다.
+  const files = Array.isArray(skill.files) ? skill.files : [];
+  for (const f of files) {
+    if (!f || typeof f.path !== 'string' || !f.path || !['utf8', 'base64'].includes(f.encoding) || typeof f.content !== 'string') {
+      throw new Error(`스킬 ${name}의 파일 항목이 올바르지 않습니다.`);
+    }
+    const candidate = path.join(dir, f.path);
+    if (!path.resolve(candidate).startsWith(path.resolve(dir) + path.sep)) {
       throw new Error(`스킬 ${name}의 파일 경로가 올바르지 않습니다: ${f.path}`);
     }
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    const buffer = f.encoding === 'base64' ? Buffer.from(f.content, 'base64') : Buffer.from(f.content, 'utf8');
-    fs.writeFileSync(dest, buffer);
+  }
+
+  fs.mkdirSync(skillsDir, { recursive: true });
+  const staged = fs.mkdtempSync(path.join(skillsDir, `.import-${name}-`));
+  try {
+    for (const f of files) {
+      const dest = path.join(staged, f.path);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      const buffer = f.encoding === 'base64' ? Buffer.from(f.content, 'base64') : Buffer.from(f.content, 'utf8');
+      fs.writeFileSync(dest, buffer);
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.renameSync(staged, dir);
+  } catch (error) {
+    fs.rmSync(staged, { recursive: true, force: true });
+    throw error;
   }
   return { name, skipped: false };
 }

@@ -10,6 +10,7 @@ import {
   connectionRemove,
   extractAddDirFlag,
   main,
+  parseLimit,
   parseOptions,
   prepareWorkspace,
   publishRemove,
@@ -22,7 +23,7 @@ import { writeRegistry, readRegistry } from '../src/registry.js';
 import { createSkill } from '../src/skills.js';
 import { isGitAvailable } from '../src/git.js';
 import { getConnectionToken, addConnection, listConnections } from '../src/secrets.js';
-import { loadRemoteConfig } from '../src/remote.js';
+import { loadRemoteConfig, upsertRemoteConfig } from '../src/remote.js';
 import { buildExportBundle } from '../src/settings.js';
 
 const HAS_GIT = isGitAvailable();
@@ -56,6 +57,12 @@ test('parseOptions treats declared booleans as flags', () => {
 test('parseOptions requires a value and collects positionals', () => {
   assert.throws(() => parseOptions(['--name'], { allowed: ['name'] }), /--name \uc635\uc158 \uac12\uc774 \ud544\uc694/);
   assert.deepEqual(parseOptions(['personal', '/tmp/v']).rest, ['personal', '/tmp/v']);
+});
+
+test('parseLimit rejects partially numeric and unsafe values', () => {
+  assert.equal(parseLimit({ limit: '10' }), 10);
+  assert.throws(() => parseLimit({ limit: '10abc' }), /양의 정수/);
+  assert.throws(() => parseLimit({ limit: '9007199254740992' }), /안전 정수/);
 });
 
 test('extractAddDirFlag consumes add-dir flags but preserves tokens after --', () => {
@@ -196,6 +203,44 @@ test('vault add no longer accepts remote flags (decoupled from publish add)', as
       () => main(['vault', 'add', '--name', 'x', '--path', path.join(root, 'v'), '--remote', 'notion']),
       /알 수 없는 옵션: --remote/,
     );
+  } finally {
+    if (prevConfig === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prevConfig;
+    if (prevData === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prevData;
+  }
+});
+
+test('non-TTY secure scaffold requires an explicit vault name', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-secure-scaffold-'));
+  const prevConfig = process.env.LLM_WIKI_CONFIG_HOME;
+  const prevData = process.env.LLM_WIKI_DATA_HOME;
+  process.env.LLM_WIKI_CONFIG_HOME = path.join(root, 'config');
+  process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
+  try {
+    const paths = getPaths(process.env);
+    const vaultPath = path.join(root, 'secure-vault');
+    writeRegistry(paths.registry, [{ name: 'work', path: vaultPath, kind: 'secure' }]);
+    await assert.rejects(() => main(['vault', 'scaffold']), /secure 볼트 scaffold는 볼트 이름을 명시/);
+    assert.equal(fs.existsSync(vaultPath), false);
+  } finally {
+    if (prevConfig === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prevConfig;
+    if (prevData === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prevData;
+  }
+});
+
+test('non-TTY secure inbox pull requires an explicit vault name before creating a client', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-secure-inbox-'));
+  const prevConfig = process.env.LLM_WIKI_CONFIG_HOME;
+  const prevData = process.env.LLM_WIKI_DATA_HOME;
+  process.env.LLM_WIKI_CONFIG_HOME = path.join(root, 'config');
+  process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
+  try {
+    const paths = getPaths(process.env);
+    const vaultPath = path.join(root, 'secure-vault');
+    fs.mkdirSync(vaultPath, { recursive: true });
+    writeRegistry(paths.registry, [{ name: 'work', path: vaultPath, kind: 'secure' }]);
+    upsertRemoteConfig(paths.publish, 'work', { provider: 'notion', inbox: { databaseId: 'db' } });
+    await assert.rejects(() => main(['inbox', 'pull']), /secure 볼트 inbox pull은 볼트 이름을 명시/);
+    assert.equal(fs.existsSync(path.join(vaultPath, 'raw', 'notes')), false);
   } finally {
     if (prevConfig === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prevConfig;
     if (prevData === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prevData;

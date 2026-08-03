@@ -1221,8 +1221,9 @@ function scaffoldTree(sourceDir, destDir, root, created) {
   }
 }
 
-function scaffoldVaults(paths, args = []) {
+async function scaffoldVaults(paths, args = []) {
   const { rest } = parseOptions(args, { allowed: [], usage: 'llmwiki vault scaffold [name]' });
+  if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: llmwiki vault scaffold [name]`);
   const targets = resolveTargets(paths, rest[0]);
   if (!targets.length) {
     console.log('등록된 볼트가 없습니다. `llmwiki vault add`로 추가하세요.');
@@ -1233,6 +1234,16 @@ function scaffoldVaults(paths, args = []) {
   }
 
   for (const vault of targets) {
+    if (vault.kind === 'secure') {
+      if (!rest[0] && !stdin.isTTY) {
+        throw new Error('secure 볼트 scaffold는 볼트 이름을 명시해야 합니다: llmwiki vault scaffold <name>');
+      }
+      if (stdin.isTTY) {
+        p.log.warn(`${vault.name}은 secure 볼트입니다. 스키마 파일과 디렉터리를 추가합니다.`);
+        const accepted = await p.confirm({ message: `${vault.name}(secure)에 scaffold를 적용할까요?`, initialValue: false });
+        if (cancelPrompt(accepted) || !accepted) continue;
+      }
+    }
     fs.mkdirSync(vault.path, { recursive: true });
     const created = [];
     scaffoldTree(paths.vaultTemplateDir, vault.path, vault.path, created);
@@ -1902,9 +1913,10 @@ function resolveRemote(paths, vault, kind) {
   return { config, provider: getProvider(config.provider) };
 }
 
-function parseLimit(options) {
-  const limit = options.limit ? Number.parseInt(options.limit, 10) : undefined;
-  if (options.limit && (!Number.isInteger(limit) || limit <= 0)) throw new Error('--limit은 양의 정수여야 합니다.');
+export function parseLimit(options) {
+  if (options.limit && !/^[1-9]\d*$/.test(String(options.limit))) throw new Error('--limit은 양의 정수여야 합니다.');
+  const limit = options.limit ? Number(options.limit) : undefined;
+  if (options.limit && !Number.isSafeInteger(limit)) throw new Error('--limit은 양의 안전 정수여야 합니다.');
   return limit;
 }
 
@@ -2007,6 +2019,16 @@ async function inboxPull(paths, args) {
 
   const dryRun = options['dry-run'] === true;
   const limit = parseLimit(options);
+
+  // dry-run은 읽기 전용이다. 실제 파일 기록은 capture와 같은 secure 쓰기 게이트를 거친다.
+  if (!dryRun && vault.kind === 'secure') {
+    if (!rest[0] && !stdin.isTTY) throw new Error('secure 볼트 inbox pull은 볼트 이름을 명시해야 합니다.');
+    if (stdin.isTTY) {
+      p.log.warn('secure 볼트에 원격 inbox 내용을 저장합니다. 고객명·자격증명·내부 URL이 포함되지 않았는지 확인하세요.');
+      const accepted = await p.confirm({ message: `${vault.name}(secure)에 inbox 항목을 저장할까요?`, initialValue: false });
+      if (cancelPrompt(accepted) || !accepted) return false;
+    }
+  }
 
   const client = await provider.createClient(
     resolveRemoteToken(process.env, { prefix: provider.tokenPrefix, vaultName: vault.name, config, secretsPath: paths.secrets, provider: provider.name }),

@@ -145,6 +145,30 @@ test('updateRemotePage replaces children and updates properties + icon', async (
   assert.equal(seenIcon.emoji, '🏢');
 });
 
+test('updateRemotePage paginates all existing children before deleting them', async () => {
+  const deleted = [];
+  let listCalls = 0;
+  const client = {
+    pages: { update: async () => {} },
+    blocks: {
+      children: {
+        list: async ({ start_cursor: cursor }) => {
+          listCalls += 1;
+          return cursor
+            ? { results: [{ id: 'old-2' }], has_more: false }
+            : { results: [{ id: 'old-1' }], has_more: true, next_cursor: 'next' };
+        },
+        append: async () => {},
+      },
+      delete: async ({ block_id: id }) => { deleted.push(id); },
+    },
+  };
+
+  await updateRemotePage(client, {}, 'p1', { fields: { title: 'X' }, body: 'new' });
+  assert.equal(listCalls, 2);
+  assert.deepEqual(deleted, ['old-1', 'old-2']);
+});
+
 test('buildViewRequests creates 4 views; board uses property_id, sorts use property name', () => {
   const requests = buildViewRequests({ dataSourceId: 'ds1', databaseId: 'db', propertyIds: { Type: 'tid' }, propertyNames: ['Type', 'Updated'] });
   assert.deepEqual(requests.map((r) => r.name), ['All', 'By Type', 'Gallery', 'Recent']);

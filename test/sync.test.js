@@ -123,6 +123,30 @@ test('pushSync creates pages via the provider and records the mapping', async ()
   assert.match(map.databases.db.pages.rag.hash, /^sha256:/);
 });
 
+test('pushSync checkpoints completed creates before a later provider failure', async () => {
+  const vault = tmpVault();
+  writePage(vault, 'wiki/concepts', 'a', { ...BASE_FIELDS, title: 'A' });
+  writePage(vault, 'wiki/concepts', 'b', { ...BASE_FIELDS, title: 'B' });
+  let calls = 0;
+  const provider = {
+    name: 'stub',
+    async createRemotePage() {
+      calls += 1;
+      if (calls === 2) throw new Error('second failed');
+      return 'remote-a';
+    },
+    async updateRemotePage() {},
+  };
+
+  await assert.rejects(
+    pushSync(vault, { provider, client: {}, ctx: { databaseId: 'db' }, subdirs: ['wiki/concepts'] }),
+    /second failed/,
+  );
+  const pages = loadRemoteMap(vault).databases.db.pages;
+  assert.equal(pages.a.remoteId, 'remote-a');
+  assert.equal(pages.b, undefined);
+});
+
 test('pushSync updates a changed page and rewrites the stored hash', async () => {
   const vault = tmpVault();
   writePage(vault, 'wiki/concepts', 'rag', BASE_FIELDS, 'v2 body');

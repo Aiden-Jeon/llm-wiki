@@ -137,7 +137,7 @@ llmwiki config export --output ~/llmwiki-settings.json
 llmwiki config import ~/llmwiki-settings.json --vaults-dir ~/llmwiki-vaults
 ```
 
-- **토큰은 절대 포함되지 않습니다**(원격 provider 토큰은 env 전용). 에이전트 실행 명령 오버라이드도 머신마다 다르므로 제외됩니다.
+- **토큰은 절대 포함되지 않습니다.** 환경 변수와 설정 디렉터리 `secrets.json`의 원격 provider 토큰은 모두 export 대상에서 제외됩니다. 에이전트 실행 명령 오버라이드도 머신마다 다르므로 제외됩니다.
 - **git 볼트**는 origin으로 자동 clone한 뒤 레지스트리에 등록합니다.
 - **local 볼트**는 경로가 머신마다 달라 자동 등록하지 않고, 목록으로 알려줍니다(수동으로 `vault add`).
 - 기존 스킬은 덮어쓰지 않고 건너뜁니다. 덮어쓰려면 `--force`.
@@ -164,7 +164,7 @@ llmwiki claude --model sonnet
 llmwiki start codex -- --model gpt-5
 ```
 
-CLI는 관리형 워크스페이스를 준비한 뒤 에이전트를 실행하므로, 현재 디렉터리와 관계없이 동일한 라우팅 지침으로 시작됩니다. 워크스페이스 동작 상세는 `WORKSPACE.md`를 참고하세요.
+CLI는 관리형 워크스페이스를 준비한 뒤 에이전트를 실행하므로, 현재 디렉터리와 관계없이 동일한 라우팅 지침으로 시작됩니다. 관리 범위와 `vaults/` 심볼릭 링크 안내는 실행 시 워크스페이스에 생성되는 `WORKSPACE.md`에서 확인할 수 있습니다.
 
 ### 컨텍스트 로드
 
@@ -259,7 +259,7 @@ llmwiki skill remove linkedin-draft
 | `.claude/commands/<name>.md` | Claude Code 슬래시 명령 (`/<name>`) |
 | `SKILLS.md` | Codex 스킬 카탈로그 |
 
-`SKILL.md` 프론트매터에는 `name`과 `description`이 필요합니다. `description`에는 트리거 발화 예시를 넣는 것이 좋습니다. 스킬 이름은 내장 명령(`wiki-add`, `wiki-search`, `wiki-use`)과 중복할 수 없습니다.
+`SKILL.md` 프론트매터에는 `name`과 `description`이 필요합니다. `description`에는 트리거 발화 예시를 넣는 것이 좋습니다. 스킬 이름은 내장 명령(`wiki-add`, `wiki-search`, `wiki-use`, `wiki-lint`)과 중복할 수 없습니다.
 
 ## 입력 소스
 
@@ -328,7 +328,7 @@ llmwiki publish remove personal      # 발행 설정만 삭제 — 그 연결을
 - **설정=전역, 상태=볼트.** 어디로·무엇을 발행할지는 볼트 밖 `publish.json`에서 관리하고, 발행 상태(`_meta/remote-map.json`)만 볼트에 남겨 git 볼트와 함께 이동하게 합니다(여러 머신에서 중복 발행 방지).
 - **토큰은 env 또는 설정 디렉터리 `secrets.json`의 named connection에만** 둡니다(레지스트리·git·`publish.json` 저장 금지). `secrets.json`은 `0600`이며 `.gitignore`·`config export`에서 제외됩니다. 조회 순서: `publish.json` 엔트리의 `tokenEnv`(env) → `LLMWIKI_<PROVIDER>_TOKEN_<VAULT>`(env) → `LLMWIKI_<PROVIDER>_TOKEN`(env) → `secrets.json`의 연결(`publish.json`의 `connection` 이름). env가 store보다 우선이라 CI·스크립트에서 저장 토큰을 덮어쓸 수 있습니다. **하나의 연결을 여러 볼트가 공유**할 수 있으므로 `publish remove`는 설정만 해제하고, 그 볼트를 지운 뒤 해당 연결을 쓰는 볼트가 하나도 안 남을 때만(고아 연결) 토큰도 지울지 물어봅니다(`--purge-token`/`--keep-token`으로 강제, 비대화형은 유지). 아직 다른 볼트가 쓰는 공유 연결은 지우지 않습니다 — 그런 토큰은 `connection remove`로만 지웁니다.
 - v1(`notion:<VAULT>` / 공용 `notion:*`) 토큰은 처음 읽을 때 자동으로 연결로 마이그레이션됩니다(`notion:*` → `default`, `notion:<VAULT>` → 소문자 볼트 키). 연결 이름이 없는 기존 `publish.json` 엔트리도 같은 규칙으로 해소돼 재설정 없이 그대로 동작합니다.
-- 발행 상태는 `_meta/remote-map.json`에 슬러그별 `remoteId`·콘텐츠 해시로 기록합니다. 해시가 바뀐 페이지만 갱신하고, 원격→local 역방향이나 원격 페이지 삭제는 하지 않습니다.
+- 발행 상태는 `_meta/remote-map.json`의 `databases[databaseId].pages[slug]`에 `remoteId`·콘텐츠 해시로 기록합니다. 데이터베이스별 매핑을 분리해 대상을 전환해도 기존 상태를 보존하며, 해시가 바뀐 페이지만 갱신합니다. 원격→local 역방향이나 원격 페이지 삭제는 하지 않습니다.
 - `kind: secure` 볼트는 `publish.json` 엔트리에 `"allowPublish": true`가 있어야 하고(`publish add --allow-publish`), push 전 확인·익명화 게이트를 거칩니다.
 - Notion provider는 `@notionhq/client` 5.x가 필요합니다(선택 의존성): `npm i @notionhq/client`. 발행·inbox는 하위 버전도 되지만 `publish view`(뷰 자동 생성)는 5.x의 Views API가 필요합니다.
 
@@ -349,7 +349,7 @@ llmwiki publish remove personal      # 발행 설정만 삭제 — 그 연결을
 
 발행되는 각 행에는 `type`별 아이콘(🏢 entity · 🧩 concept · 📄 source · 🔍 analysis, 그 외 📝)이 자동으로 붙어 Board·Gallery 카드에서 한눈에 구분됩니다.
 
-통짜 표를 벗어나도록, **첫 발행 때 대상 DB에 뷰 탭이 자동으로 생성됩니다**(`@notionhq/client` 5.x 필요). 이미 만들었는지는 `_meta/remote-map.json`의 플래그로 추적해 탭이 중복되지 않으며, 이후 발행에선 건너뜁니다.
+통짜 표를 벗어나도록, **첫 발행 때 대상 DB에 뷰 탭이 자동으로 생성됩니다**(`@notionhq/client` 5.x 필요). 이미 만들었는지는 `_meta/remote-map.json`의 DB별 `viewsCreated` 플래그로 추적해 탭이 중복되지 않으며, 이후 같은 DB로 발행할 때는 건너뜁니다.
 
 - **All** (Table) — `Updated` 내림차순 정본 뷰.
 - **By Type** (Board) — `Type`으로 그룹핑해 entity/concept/source/analysis 네 축을 한눈에.

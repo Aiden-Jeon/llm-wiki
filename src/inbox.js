@@ -65,11 +65,10 @@ export async function pullInbox(vaultPath, { provider, client, ctx = {}, dryRun 
     const relative = path.relative(vaultPath, notePath);
     state.pulled[id] = { pulledAt: now.toISOString().slice(0, 10), file: relative };
     pulled.push({ id, file: relative });
-  }
-
-  if (!dryRun && pulled.length) {
+    // 이후 항목의 fetch/write가 실패해도 이미 만든 파일의 dedup 기록은 보존한다.
     if (provider.name) state.provider = provider.name;
     saveInboxState(vaultPath, state);
   }
+
   return { pulled, skipped, dryRun };
 }

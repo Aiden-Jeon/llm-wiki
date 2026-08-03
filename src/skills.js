@@ -3,7 +3,7 @@ import path from 'node:path';
 
 export const SKILL_FILE = 'SKILL.md';
 // 내장 라우팅 명령과 이름이 겹치면 워크스페이스에서 서로를 덮어쓴다.
-export const RESERVED_SKILL_NAMES = ['wiki-add', 'wiki-search', 'wiki-use'];
+export const RESERVED_SKILL_NAMES = ['wiki-add', 'wiki-search', 'wiki-use', 'wiki-lint'];
 const NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 
 export function validateSkillName(value) {
@@ -182,6 +182,13 @@ export function createSkill(skillsDir, { name, description = '', from, force = f
     sourceIsDirectory = fs.statSync(source).isDirectory();
     if (sourceIsDirectory && !fs.existsSync(path.join(source, SKILL_FILE))) {
       throw new Error(`${source}에 ${SKILL_FILE}이 없습니다.`);
+    }
+    const resolvedDir = path.resolve(dir);
+    const sourceContainsDestination = sourceIsDirectory
+      && (resolvedDir === source || (!path.relative(source, resolvedDir).startsWith('..') && !path.isAbsolute(path.relative(source, resolvedDir))));
+    const sameSkillFile = !sourceIsDirectory && source === path.resolve(dir, SKILL_FILE);
+    if (sourceContainsDestination || sameSkillFile) {
+      throw new Error('가져올 경로와 대상 스킬 경로가 같거나 대상이 원본 안에 있습니다. 다른 경로를 사용하세요.');
     }
   }
 

@@ -208,7 +208,7 @@ Obsidian properties UI와 호환되도록 `tags`, `aliases`, `sources` 등 리�
 발행 행에는 `type`별 아이콘이 자동으로 붙고, 대상 DB의 뷰 탭(Table/Board/Gallery/List)은 첫 발행
 때 자동 생성된다(이후엔 건너뜀). 뷰를 다시 만들려면 `llmwiki publish view <vault>`로 강제 재생성한다.
 
-원격 대상·토큰 설정은 `WIKI-CLI.md § 보안 경계`의 원격 연동 규칙을 따른다(토큰은 환경 변수에만).
+원격 대상·토큰 설정은 `WIKI-CLI.md § 보안 경계`의 원격 연동 규칙을 따른다(토큰은 환경 변수 또는 설정 디렉터리 `secrets.json`에만 둔다).
 
 ## index.md 규칙
 

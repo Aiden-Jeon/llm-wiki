@@ -562,8 +562,9 @@ export async function createRemotePage(client, ctx, page) {
 export async function updateRemotePage(client, ctx, remoteId, page) {
   const props = frontmatterToProperties(page.fields, { titleProp: ctx.titleProp });
   await client.pages.update({ page_id: remoteId, icon: iconForType(page.fields.type), properties: props });
-  const existing = await client.blocks.children.list({ block_id: remoteId });
-  for (const child of existing.results || []) {
+  // 삭제 전에 모든 페이지를 수집한다. 첫 100개만 지우면 이전 본문의 나머지가 새 본문 뒤에 남는다.
+  const existing = await listBlockChildren(client, remoteId);
+  for (const child of existing) {
     await client.blocks.delete({ block_id: child.id });
   }
   for (const chunk of chunkBlocks(markdownToBlocks(page.body))) {

@@ -107,3 +107,22 @@ test('applyImportBundle skips existing skills unless force', () => {
   assert.deepEqual(forced.skills.restored, ['dup']);
   assert.match(fs.readFileSync(path.join(dest.skillsDir, 'dup', 'SKILL.md'), 'utf8'), /새것/);
 });
+
+test('applyImportBundle validates every forced skill file before deleting the existing skill', () => {
+  const dest = tmpPaths();
+  createSkill(dest.skillsDir, { name: 'dup', description: '기존' });
+  const bundle = {
+    version: 1,
+    vaults: [],
+    skills: [{
+      name: 'dup',
+      files: [
+        { path: 'SKILL.md', encoding: 'utf8', content: 'replacement' },
+        { path: '../escape', encoding: 'utf8', content: 'bad' },
+      ],
+    }],
+  };
+
+  assert.throws(() => applyImportBundle(dest, bundle, { force: true }), /파일 경로가 올바르지/);
+  assert.match(fs.readFileSync(path.join(dest.skillsDir, 'dup', 'SKILL.md'), 'utf8'), /기존/);
+});

@@ -69,3 +69,18 @@ test('pullInbox respects the limit', async () => {
   const result = await pullInbox(vault, { provider, client: {}, ctx: {}, limit: 2 });
   assert.equal(result.pulled.length, 2);
 });
+
+test('pullInbox checkpoints completed files before a later fetch failure', async () => {
+  const vault = tmpVault();
+  const provider = stubProvider([{ id: 'id-1', title: 'First' }, { id: 'id-2', title: 'Second' }]);
+  provider.fetchInboxNote = async (_client, item) => {
+    if (item.id === 'id-2') throw new Error('fetch failed');
+    return { title: item.title, markdown: 'body' };
+  };
+
+  await assert.rejects(pullInbox(vault, { provider, client: {}, ctx: {} }), /fetch failed/);
+  const state = loadInboxState(vault);
+  assert.ok(state.pulled['id-1']);
+  assert.equal(state.pulled['id-2'], undefined);
+  assert.equal(fs.readdirSync(path.join(vault, 'raw', 'notes')).length, 1);
+});

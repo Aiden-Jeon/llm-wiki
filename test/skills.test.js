@@ -28,6 +28,7 @@ test('parseSkillFrontmatter reads quoted and colon-containing values', () => {
 test('validateSkillName rejects reserved and malformed names', () => {
   assert.equal(validateSkillName('linkedin-draft'), 'linkedin-draft');
   assert.throws(() => validateSkillName('wiki-add'), /\ub0b4\uc7a5 \uba85\ub839/);
+  assert.throws(() => validateSkillName('wiki-lint'), /\ub0b4\uc7a5 \uba85\ub839/);
   assert.throws(() => validateSkillName('Bad Name'), /\uc18c\ubb38\uc790/);
 });
 
@@ -77,6 +78,13 @@ test('createSkill validates import sources before creating the destination', () 
   const invalid = tmpDir();
   assert.throws(() => createSkill(skillsDir, { name: 'invalid-source', from: invalid }), /SKILL\.md이 없습니다/);
   assert.equal(fs.existsSync(path.join(skillsDir, 'invalid-source')), false);
+});
+
+test('createSkill refuses to force-import a skill from its own destination', () => {
+  const skillsDir = tmpDir();
+  const { dir } = createSkill(skillsDir, { name: 'same', description: 'keep me' });
+  assert.throws(() => createSkill(skillsDir, { name: 'same', from: dir, force: true }), /가져올 경로와 대상/);
+  assert.match(fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8'), /keep me/);
 });
 
 test('readSkill reports missing description and name mismatch', () => {

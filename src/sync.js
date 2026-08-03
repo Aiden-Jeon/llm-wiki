@@ -9,7 +9,7 @@ const STATUS_DEFAULT = 'active';
 
 // local → 원격 단방향 동기화. diff를 떠 없는/바뀐 페이지만 push한다. 절대 원격→local 안 함.
 // 실제 원격 호출(페이지 생성·갱신)은 provider가 담당하고, 이 모듈은 스캔·diff·상태 기록만 한다.
-// 상태는 <vault>/_meta/remote-map.json에 슬러그별로 기록한다(git 커밋 대상, provider-중립).
+// 상태는 <vault>/_meta/remote-map.json에 DB별·슬러그별로 기록한다(git 커밋 대상, provider-중립).
 
 export const REMOTE_MAP_FILE = path.join('_meta', 'remote-map.json');
 
@@ -199,6 +199,9 @@ export async function pushSync(vaultPath, { provider, client, ctx = {}, subdirs,
       syncedAt: now,
       title: page.fields.title || page.slug,
     };
+    // 다음 원격 호출이 실패해도 방금 완료한 작업을 잊지 않도록 항목별로 체크포인트한다.
+    // 특히 create의 remoteId를 잃으면 재실행 시 같은 페이지를 중복 생성하게 된다.
+    saveRemoteMap(vaultPath, map);
   }
 
   // 첫 발행 시 대상 DB에 뷰 탭을 자동 생성한다(초기 1회, DB별 플래그로 idempotent).
