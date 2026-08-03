@@ -195,6 +195,13 @@ llmwiki skill remove linkedin-draft
 
 표준 위키 스키마(3계층 `raw/` → `wiki/{entities,concepts,sources,analyses}` → `_meta/`, frontmatter·태그통제·index/log 규약)의 정본은 `templates/vault/`에 있습니다. 새 볼트는 `llmwiki vault scaffold <name>`으로 이 골격을 생성하고, `llmwiki vault lint <name>`으로 적합성을 검사할 수 있습니다. 기계 검사 계약은 각 볼트의 `_meta/schema.md`에 명문화되어 있습니다.
 
+### 스키마 정본을 어디서 고치나
+
+- **표준 스키마 정본**은 설치된 CLI 패키지의 `templates/vault/`입니다. 스키마 규칙 자체(디렉터리 골격, `CLAUDE.md` 워크플로우, `_meta/schema.md` 검사 계약)를 바꾸려면 이 패키지 파일을 수정합니다. 볼트마다 복사된 사본을 고치는 것이 아닙니다.
+- `_meta/schema.md`의 검사 계약과 결정론 린터(`src/lint.js`)는 같은 규칙을 담습니다. **규칙을 바꾸면 두 곳을 함께 수정**해야 드리프트가 나지 않습니다.
+- `vault scaffold`는 템플릿을 볼트로 **복사**할 뿐이며, **이미 있는 파일은 절대 덮어쓰지 않습니다**. 따라서 템플릿을 수정해도 기존 볼트의 사본은 그대로 유지되고, 새로 만드는 볼트(또는 아직 없던 파일)에만 반영됩니다.
+- 개별 볼트 안에서는 그 볼트의 `CLAUDE.md`가 정본입니다(`설계 원칙 · 볼트가 정본`). 특정 볼트만 규칙을 달리하려면 그 볼트의 파일을 직접 조정하고, 모든 볼트에 적용할 표준을 바꾸려면 패키지 템플릿을 고칩니다.
+
 ## 개발
 
 ```bash
