@@ -55,6 +55,18 @@ test('parseRichText splits bold, italic, code, and links', () => {
   assert.equal(link.text.link.url, 'http://x');
 });
 
+test('parseRichText drops non-absolute link URLs but keeps the text', () => {
+  for (const url of ['./foo.md', '../a/b.md', '#anchor', 'notes/x.md']) {
+    const runs = parseRichText(`see [here](${url})`);
+    const linked = runs.find((r) => r.text.link);
+    assert.equal(linked, undefined, `expected no link for ${JSON.stringify(url)}`);
+    assert.ok(runs.some((r) => r.text.content === 'here'), 'link text should survive');
+  }
+  // 절대 URL·mailto는 그대로 링크가 된다.
+  assert.equal(parseRichText('[a](https://x.io)').find((r) => r.text.link).text.link.url, 'https://x.io');
+  assert.equal(parseRichText('[m](mailto:a@b.co)').find((r) => r.text.link).text.link.url, 'mailto:a@b.co');
+});
+
 test('frontmatterToProperties maps fields to typed Notion properties', () => {
   const props = frontmatterToProperties({
     title: 'RAG',

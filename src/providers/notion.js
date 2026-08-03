@@ -383,6 +383,21 @@ export async function createViews(client, { databaseId } = {}) {
 
 const HEADING_LEVEL = { 1: 'heading_1', 2: 'heading_2', 3: 'heading_3' };
 
+// Notion 링크로 허용되는 URL인지 판별한다. 절대 URL(http/https/mailto 등) 또는
+// 프로토콜 상대(//host)만 통과시키고, 상대 경로·wikilink·앵커는 거부한다.
+function isValidLinkUrl(url) {
+  const value = String(url ?? '').trim();
+  if (!value) return false;
+  if (value.startsWith('//')) return true;
+  try {
+    // eslint-disable-next-line no-new
+    new URL(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // 인라인 마크(**bold**, *italic*, `code`, [text](url))를 Notion rich_text 배열로 파싱한다.
 // 겹침·중첩은 단순화하여 순차 스캔으로 처리한다.
 export function parseRichText(text) {
@@ -390,7 +405,9 @@ export function parseRichText(text) {
   const push = (content, annotations = {}, link = null) => {
     if (!content) return;
     const rich = { type: 'text', text: { content } };
-    if (link) rich.text.link = { url: link };
+    // Notion은 절대 URL만 링크로 받는다. 상대 경로(./foo.md)·wikilink·앵커(#x)·빈
+    // 문자열은 거부되므로("Invalid URL for link") 링크를 떼고 텍스트만 남긴다.
+    if (link && isValidLinkUrl(link)) rich.text.link = { url: link };
     if (Object.keys(annotations).length) rich.annotations = annotations;
     runs.push(rich);
   };
