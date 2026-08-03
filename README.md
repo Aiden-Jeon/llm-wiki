@@ -4,13 +4,14 @@
 
 지식 추가·검색·활용을 위해 볼트마다 직접 이동할 필요 없이, 각 볼트의 Git 저장소·운영 규칙·보안 경계는 분리해서 유지합니다.
 
-핵심 목적은 **로컬에서 지식을 작업하고, 그 결과를 Notion 같은 원격 저장소에서 보여주는 것**입니다. 전체 흐름은 세 단계입니다.
+핵심 목적은 **로컬에서 지식을 작업하고, 여러 머신에서 이어서 작업하며, 그 결과를 Notion 같은 원격 저장소에서 보여주는 것**입니다. 로컬 위키(볼트)를 중심으로 입력·공유·발행이 갈라집니다.
 
 ```text
-① 입력 소스            ②  로컬 위키 (볼트)          ③ 원격 발행
-llmwiki new     ─┐
-llmwiki capture ─┼─▶  raw/ → wiki/ (Markdown)  ─▶  llmwiki sync ─▶ 원격 (provider)
-llmwiki inbox pull ┘        정본은 로컬                 (local→원격 단방향)
+① 입력 소스                ②  로컬 위키 (볼트)              ③ 원격 발행 (view)
+llmwiki new     ─┐                                    ┌─▶ llmwiki sync ─▶ 원격 (provider: Notion …)
+llmwiki capture ─┼─▶   raw/ → wiki/ (Markdown)   ─────┤        (local→원격 단방향)
+llmwiki inbox pull ┘        정본은 로컬                 └─▶ llmwiki vault sync ⇄ git repo
+                                                              (git 백엔드 · 머신 간 파일 공유)
 ```
 
 - **입력 소스** — 새 정보를 로컬 볼트로 받아오는 창구(`new` / `capture` / `inbox pull`). [자세히](#입력-소스)
