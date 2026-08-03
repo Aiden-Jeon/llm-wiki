@@ -6,8 +6,10 @@ export const REGISTRY_HEADER = `# 볼트 레지스트리
 
 이 파일은 \`llmwiki\`가 관리합니다. 경로는 절대 경로로 저장됩니다.
 
-| name | path | kind | signals | notes |
-|------|------|------|---------|-------|`;
+backend는 \`local\`(그냥 폴더) 또는 \`git\`(git repo, \`llmwiki vault sync\`로 동기화)입니다. origin은 git backend의 원격 URL입니다.
+
+| name | path | kind | backend | origin | signals | notes |
+|------|------|------|---------|--------|---------|-------|`;
 
 // 논리 에이전트 이름 → 실제 실행 명령을 재정의할 수 있는 대상.
 export const SUPPORTED_AGENTS = ['claude', 'codex'];
@@ -42,10 +44,20 @@ export function normalizeVault(vault) {
   const kind = validateField('kind', vault.kind || 'open');
   if (!['open', 'secure'].includes(kind)) throw new Error('kind는 open 또는 secure여야 합니다.');
 
+  const backend = validateField('backend', vault.backend || 'local');
+  if (!['local', 'git'].includes(backend)) throw new Error('backend는 local 또는 git여야 합니다.');
+
+  // origin은 git backend에서만 의미가 있다. local은 항상 빈 값으로 강제한다.
+  const origin = validateField('origin', vault.origin);
+  if (backend === 'git' && !origin) throw new Error('git backend 볼트는 origin(원격 URL)이 필요합니다.');
+  if (backend === 'local' && origin) throw new Error('local backend 볼트에는 origin을 지정할 수 없습니다.');
+
   return {
     name,
     path: vaultPath,
     kind,
+    backend,
+    origin,
     signals: validateField('signals', vault.signals),
     notes: validateField('notes', vault.notes),
   };
@@ -120,16 +132,21 @@ export function parseRegistryFile(content) {
       continue;
     }
 
-    if (cells.length !== 5) {
-      issues.push({ line: lineNumber, raw, message: `열이 정확히 5개(name/path/kind/signals/notes) 필요하지만 ${cells.length}개입니다.` });
+    // 7컬럼(현행)과 5컬럼(레거시: backend/origin 없이 저장된 파일)을 모두 받는다.
+    // 레거시 행은 backend=local, origin=''로 승격한다.
+    let fields;
+    if (cells.length === 7) {
+      fields = { name: cells[0], path: cells[1], kind: cells[2], backend: cells[3], origin: cells[4], signals: cells[5], notes: cells[6] };
+    } else if (cells.length === 5) {
+      fields = { name: cells[0], path: cells[1], kind: cells[2], backend: 'local', origin: '', signals: cells[3], notes: cells[4] };
+    } else {
+      issues.push({ line: lineNumber, raw, message: `열이 7개(name/path/kind/backend/origin/signals/notes) 또는 5개(레거시) 필요하지만 ${cells.length}개입니다.` });
       continue;
     }
 
     let vault;
     try {
-      vault = normalizeVault({
-        name: cells[0], path: cells[1], kind: cells[2], signals: cells[3], notes: cells[4],
-      });
+      vault = normalizeVault(fields);
     } catch (error) {
       issues.push({ line: lineNumber, raw, message: error.message });
       continue;
@@ -162,7 +179,7 @@ export function formatIssues(file, issues) {
 export function renderRegistry(vaults, agents = []) {
   const vaultRows = vaults.map((vault) => {
     const v = normalizeVault(vault);
-    return `| ${v.name} | ${v.path} | ${v.kind} | ${v.signals} | ${v.notes} |`;
+    return `| ${v.name} | ${v.path} | ${v.kind} | ${v.backend} | ${v.origin} | ${v.signals} | ${v.notes} |`;
   });
   let out = `${REGISTRY_HEADER}\n${vaultRows.length ? `${vaultRows.join('\n')}\n` : ''}`;
   if (agents.length) {

@@ -78,6 +78,31 @@ test('buildIngestPrompt targets the slash command for claude and a task instruct
 test('main rejects unknown commands and bad inbox subcommands', async () => {
   await assert.rejects(main(['bogus']), /알 수 없는 명령: bogus/);
   await assert.rejects(main(['inbox', 'push']), /llmwiki inbox pull/);
+  await assert.rejects(main(['vault', 'bogus']), /add\|list\|show\|remove\|lint\|scaffold\|sync/);
+});
+
+test('vault sync skips a local backend vault instead of running git', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-vsync-'));
+  const paths = getPaths({ LLM_WIKI_CONFIG_HOME: path.join(root, 'config'), LLM_WIKI_DATA_HOME: path.join(root, 'data') });
+  const vaultPath = path.join(root, 'vault');
+  fs.mkdirSync(vaultPath, { recursive: true });
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
+
+  const prev = { c: process.env.LLM_WIKI_CONFIG_HOME, d: process.env.LLM_WIKI_DATA_HOME };
+  process.env.LLM_WIKI_CONFIG_HOME = path.join(root, 'config');
+  process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
+  const logs = [];
+  const origLog = console.log;
+  console.log = (msg) => logs.push(String(msg));
+  try {
+    const result = await main(['vault', 'sync', 'personal']);
+    assert.equal(result, false);
+    assert.ok(logs.some((l) => /local 백엔드라 sync 대상이 아닙니다/.test(l)));
+  } finally {
+    console.log = origLog;
+    if (prev.c === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prev.c;
+    if (prev.d === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prev.d;
+  }
 });
 
 test('sync accepts --dry-run so it errors on config, not on the flag', async () => {

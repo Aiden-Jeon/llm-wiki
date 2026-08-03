@@ -13,10 +13,48 @@ test('registry markdown round-trip', () => {
     name: 'personal',
     path: '/tmp/my-wiki',
     kind: 'open',
+    backend: 'local',
+    origin: '',
     signals: 'career, AI',
     notes: 'public notes',
   }];
   assert.deepEqual(parseRegistry(renderRegistry(input)), input);
+});
+
+test('registry round-trips a git backend vault with origin', () => {
+  const input = [{
+    name: 'gwiki',
+    path: '/tmp/gwiki',
+    kind: 'open',
+    backend: 'git',
+    origin: 'git@github.com:me/wiki.git',
+    signals: '',
+    notes: '',
+  }];
+  assert.deepEqual(parseRegistry(renderRegistry(input)), input);
+});
+
+test('registry validates backend/origin coupling', () => {
+  assert.throws(() => normalizeVault({ name: 'g', path: '/tmp/g', backend: 'git' }), /origin\(원격 URL\)/);
+  assert.throws(() => normalizeVault({ name: 'l', path: '/tmp/l', origin: 'git@x:y.git' }), /local backend.*origin/);
+  assert.throws(() => normalizeVault({ name: 'b', path: '/tmp/b', backend: 'svn' }), /local 또는 git/);
+  // 기본 backend는 local, origin은 빈 값.
+  const v = normalizeVault({ name: 'd', path: '/tmp/d' });
+  assert.equal(v.backend, 'local');
+  assert.equal(v.origin, '');
+});
+
+test('registry promotes legacy 5-column rows to backend=local', () => {
+  const content = [
+    '| name | path | kind | signals | notes |',
+    '|------|------|------|---------|-------|',
+    '| old | /tmp/old | open | sig | note |',
+  ].join('\n');
+  const { vaults, issues } = parseRegistryFile(content);
+  assert.equal(issues.length, 0);
+  assert.equal(vaults[0].backend, 'local');
+  assert.equal(vaults[0].origin, '');
+  assert.equal(vaults[0].signals, 'sig');
 });
 
 test('registry expands POSIX and Windows-style home-relative vault paths', () => {
@@ -45,16 +83,16 @@ test('registry reports broken rows with line numbers instead of throwing', () =>
   assert.deepEqual(vaults.map((vault) => vault.name), ['ok']);
   assert.deepEqual(issues.map((issue) => issue.line), [4, 5, 6]);
   assert.match(issues[0].message, /open 또는 secure/);
-  assert.match(issues[1].message, /5개/);
+  assert.match(issues[1].message, /7개.*또는.*5개/);
   assert.match(issues[2].message, /중복/);
 });
 
-test('registry reports rows with extra columns', () => {
+test('registry reports rows with an unsupported column count', () => {
   const content = '| extra | /tmp/extra | open | signal | note | unexpected |';
   const { vaults, issues } = parseRegistryFile(content);
   assert.equal(vaults.length, 0);
   assert.equal(issues.length, 1);
-  assert.match(issues[0].message, /정확히 5개/);
+  assert.match(issues[0].message, /7개.*또는.*5개/);
 });
 
 test('readRegistry is strict for writers and lenient when asked', () => {
@@ -67,7 +105,7 @@ test('readRegistry is strict for writers and lenient when asked', () => {
 });
 
 test('registry round-trips agent overrides with add-dir flag', () => {
-  const vaults = [{ name: 'personal', path: '/tmp/v', kind: 'open', signals: '', notes: '' }];
+  const vaults = [{ name: 'personal', path: '/tmp/v', kind: 'open', backend: 'local', origin: '', signals: '', notes: '' }];
   const agents = [
     { name: 'claude', command: 'vibe agent', addDir: false },
     { name: 'codex', command: 'dbexec repo run isaac', addDir: true },
