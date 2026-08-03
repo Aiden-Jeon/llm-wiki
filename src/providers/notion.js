@@ -22,6 +22,54 @@ export const connectHelp = 'integration의 Content access 탭 → Add pages & da
   + ' (또는 대상 페이지에서 ⋯ → Connections). 연결 후 다시 시도하세요.';
 
 const NOTION_BLOCK_LIMIT = 100; // children 추가 요청당 최대 블록 수(Notion 제한).
+const NOTION_TEXT_LIMIT = 2000; // rich_text 항목당 text.content 최대 길이(Notion 제한).
+
+// Notion code 블록이 허용하는 language 열거값(고정 목록). 이 외 값은 거부된다.
+const NOTION_CODE_LANGUAGES = new Set([
+  'abap', 'abc', 'agda', 'arduino', 'ascii art', 'assembly', 'bash', 'basic', 'bnf', 'c',
+  'c#', 'c++', 'clojure', 'coffeescript', 'coq', 'css', 'dart', 'dhall', 'diff', 'docker',
+  'ebnf', 'elixir', 'elm', 'erlang', 'f#', 'flow', 'fortran', 'gherkin', 'glsl', 'go',
+  'graphql', 'groovy', 'haskell', 'hcl', 'html', 'idris', 'java', 'javascript', 'json',
+  'julia', 'kotlin', 'latex', 'less', 'lisp', 'livescript', 'llvm ir', 'lua', 'makefile',
+  'markdown', 'markup', 'matlab', 'mathematica', 'mermaid', 'nix', 'notion formula',
+  'objective-c', 'ocaml', 'pascal', 'perl', 'php', 'plain text', 'powershell', 'prolog',
+  'protobuf', 'purescript', 'python', 'r', 'racket', 'reason', 'ruby', 'rust', 'sass',
+  'scala', 'scheme', 'scss', 'shell', 'smalltalk', 'solidity', 'sql', 'swift', 'toml',
+  'typescript', 'vb.net', 'verilog', 'vhdl', 'visual basic', 'webassembly', 'xml', 'yaml',
+  'java/c/c++/c#',
+]);
+
+// 펜스에서 흔히 쓰는 별칭 → Notion 표준 language. 여기 없고 열거값도 아니면 'plain text'.
+const NOTION_CODE_LANGUAGE_ALIASES = {
+  text: 'plain text', txt: 'plain text', plaintext: 'plain text', plain: 'plain text',
+  sh: 'shell', zsh: 'shell', console: 'shell', shellsession: 'shell',
+  js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript', node: 'javascript',
+  ts: 'typescript', tsx: 'typescript',
+  py: 'python', py3: 'python', python3: 'python',
+  rb: 'ruby', yml: 'yaml', md: 'markdown', dockerfile: 'docker', 'c++': 'c++', cpp: 'c++',
+  cs: 'c#', csharp: 'c#', 'objective c': 'objective-c', objc: 'objective-c',
+  golang: 'go', rs: 'rust', kt: 'kotlin', tf: 'hcl', terraform: 'hcl', htm: 'html',
+  vue: 'html', svelte: 'html', proto: 'protobuf', ps1: 'powershell', bat: 'shell',
+};
+
+// 코드펜스 language를 Notion이 받는 값으로 정규화한다. 별칭 매핑 → 열거값 확인 → 미지원은
+// 'plain text'로 폴백(발행이 언어명 하나로 실패하지 않도록).
+function normalizeCodeLanguage(lang) {
+  const raw = String(lang || '').trim().toLowerCase();
+  if (!raw) return 'plain text';
+  if (NOTION_CODE_LANGUAGES.has(raw)) return raw;
+  return NOTION_CODE_LANGUAGE_ALIASES[raw] || 'plain text';
+}
+
+// 긴 문자열을 Notion 한도(2000자) 이하 조각으로 쪼갠다. 한 블록의 rich_text 배열에
+// 여러 조각을 넣으면 Notion이 이어붙여 렌더하므로 블록은 하나로 유지된다.
+function splitContent(content, size = NOTION_TEXT_LIMIT) {
+  const text = String(content ?? '');
+  if (text.length <= size) return [text];
+  const parts = [];
+  for (let i = 0; i < text.length; i += size) parts.push(text.slice(i, i + size));
+  return parts;
+}
 
 // publish 대상 DB가 갖춰야 하는 속성 → Notion 타입. frontmatterToProperties와 짝이며,
 // title 속성은 이름이 가변('Name' 기본)이라 여기서 name은 기본값일 뿐 매칭은 type=title로 한다.
@@ -464,12 +512,16 @@ export function parseRichText(text) {
   const runs = [];
   const push = (content, annotations = {}, link = null) => {
     if (!content) return;
-    const rich = { type: 'text', text: { content } };
     // Notion은 절대 URL만 링크로 받는다. 상대 경로(./foo.md)·wikilink·앵커(#x)·빈
     // 문자열은 거부되므로("Invalid URL for link") 링크를 떼고 텍스트만 남긴다.
-    if (link && isValidLinkUrl(link)) rich.text.link = { url: link };
-    if (Object.keys(annotations).length) rich.annotations = annotations;
-    runs.push(rich);
+    const validLink = link && isValidLinkUrl(link) ? { url: link } : null;
+    // 2000자 초과 런은 여러 rich_text 조각으로 쪼갠다(Notion 항목당 한도).
+    for (const chunk of splitContent(content)) {
+      const rich = { type: 'text', text: { content: chunk } };
+      if (validLink) rich.text.link = validLink;
+      if (Object.keys(annotations).length) rich.annotations = annotations;
+      runs.push(rich);
+    }
   };
   // 링크 → 코드 → 굵게 → 기울임 순으로 토큰을 찾는다.
   const pattern = /(\[([^\]]+)\]\(([^)]+)\))|(`([^`]+)`)|(\*\*([^*]+)\*\*)|(\*([^*]+)\*)|(_([^_]+)_)/;
@@ -507,7 +559,7 @@ export function markdownToBlocks(body) {
     // 코드 펜스
     const fence = /^```(\w*)\s*$/.exec(line);
     if (fence) {
-      const lang = fence[1] || 'plain text';
+      const lang = normalizeCodeLanguage(fence[1]);
       const code = [];
       i += 1;
       while (i < lines.length && !/^```\s*$/.test(lines[i])) { code.push(lines[i]); i += 1; }
@@ -515,7 +567,10 @@ export function markdownToBlocks(body) {
       blocks.push({
         object: 'block',
         type: 'code',
-        code: { rich_text: [{ type: 'text', text: { content: code.join('\n') } }], language: lang },
+        code: {
+          rich_text: splitContent(code.join('\n')).map((content) => ({ type: 'text', text: { content } })),
+          language: lang,
+        },
       });
       continue;
     }

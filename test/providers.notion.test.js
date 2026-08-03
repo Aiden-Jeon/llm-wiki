@@ -40,10 +40,38 @@ test('markdownToBlocks maps headings (clamped to 3), lists, to-do, quote, divide
 test('markdownToBlocks captures code fences with language fallback', () => {
   const [withLang] = markdownToBlocks('```js\nconst x = 1;\n```');
   assert.equal(withLang.type, 'code');
-  assert.equal(withLang.code.language, 'js');
+  assert.equal(withLang.code.language, 'javascript');
   assert.equal(withLang.code.rich_text[0].text.content, 'const x = 1;');
   const [noLang] = markdownToBlocks('```\nplain\n```');
   assert.equal(noLang.code.language, 'plain text');
+});
+
+test('markdownToBlocks normalizes code fence languages to Notion enum values', () => {
+  // 별칭은 표준 언어로 매핑된다.
+  assert.equal(markdownToBlocks('```py\nx\n```')[0].code.language, 'python');
+  assert.equal(markdownToBlocks('```ts\nx\n```')[0].code.language, 'typescript');
+  assert.equal(markdownToBlocks('```sh\nx\n```')[0].code.language, 'shell');
+  assert.equal(markdownToBlocks('```text\nx\n```')[0].code.language, 'plain text');
+  // 이미 유효한 값은 그대로 유지된다.
+  assert.equal(markdownToBlocks('```python\nx\n```')[0].code.language, 'python');
+  // 알 수 없는 언어는 plain text로 폴백한다.
+  assert.equal(markdownToBlocks('```wat\nx\n```')[0].code.language, 'plain text');
+});
+
+test('markdownToBlocks splits a >2000-char code block into multiple rich_text chunks', () => {
+  const source = 'x'.repeat(4500);
+  const [codeBlock] = markdownToBlocks('```\n' + source + '\n```');
+  assert.equal(codeBlock.type, 'code');
+  assert.ok(codeBlock.code.rich_text.length > 1, 'expected multiple rich_text segments');
+  for (const run of codeBlock.code.rich_text) assert.ok(run.text.content.length <= 2000);
+  assert.equal(codeBlock.code.rich_text.map((r) => r.text.content).join(''), source);
+});
+
+test('parseRichText splits a >2000-char run into ≤2000-char chunks', () => {
+  const runs = parseRichText('y'.repeat(5000));
+  assert.ok(runs.length > 1, 'expected multiple runs');
+  for (const run of runs) assert.ok(run.text.content.length <= 2000);
+  assert.equal(runs.map((r) => r.text.content).join(''), 'y'.repeat(5000));
 });
 
 test('parseRichText splits bold, italic, code, and links', () => {
