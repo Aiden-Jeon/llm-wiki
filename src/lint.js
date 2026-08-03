@@ -152,11 +152,9 @@ export function lintVault(vaultPath) {
       add('error', page.rel, 'frontmatter가 없습니다.');
       continue;
     }
-    const missing = REQUIRED_FIELDS.filter((field) => {
-      const value = page.fields[field];
-      if (value === undefined) return true;
-      return Array.isArray(value) ? value.length === 0 : String(value).trim() === '';
-    });
+    // 계약(_meta/schema.md)은 필드의 "존재"를 요구한다("비어있지 않음"이 아님).
+    // 의도적으로 빈 리스트(tags: [])나 빈 값은 누락으로 보지 않는다 — 키가 아예 없을 때만 누락.
+    const missing = REQUIRED_FIELDS.filter((field) => page.fields[field] === undefined);
     if (missing.length) add('error', page.rel, `필수 frontmatter 누락: ${missing.join(', ')}`);
 
     const type = page.fields.type;
@@ -164,7 +162,10 @@ export function lintVault(vaultPath) {
       add('error', page.rel, `type가 올바르지 않습니다: ${type} (허용: ${PAGE_TYPES.join(', ')})`);
     }
     const expectedType = DIR_TYPE[page.dir];
-    if (expectedType && type !== undefined && type !== expectedType) {
+    if (!expectedType) {
+      // 네 타입 디렉터리 밖(또는 중첩)의 페이지 — 스키마상 위치가 없다.
+      add('error', page.rel, `페이지가 타입 디렉터리(${Object.keys(DIR_TYPE).join('/')}) 밖에 있습니다: ${page.dir}/`);
+    } else if (type !== undefined && type !== expectedType) {
       add('error', page.rel, `type(${type})가 디렉터리(${page.dir}/)와 맞지 않습니다. 기대: ${expectedType}`);
     }
     if (page.fields.status !== undefined && !STATUSES.includes(page.fields.status)) {
@@ -182,10 +183,13 @@ export function lintVault(vaultPath) {
       if (!knownTags.has(tag)) add('warn', page.rel, `taxonomy.md에 없는 태그: ${tag}`);
     }
 
-    // 4. 깨진 wikilink (warn) — 경로형 링크는 제외.
+    // 4. 깨진 wikilink (warn) — 경로형 링크(슬래시 포함)만 제외한다. 확장자만 붙은
+    //    링크([[missing.md]] 등)는 파일명(확장자 제거) 집합에 대조해 계속 검사한다.
     for (const target of extractWikilinks(page.body)) {
-      if (target.includes('/') || target.includes('\\') || target.includes('.')) continue;
-      if (!slugSet.has(target.toLowerCase())) add('warn', page.rel, `깨진 wikilink: [[${target}]]`);
+      if (target.includes('/') || target.includes('\\')) continue;
+      // slugSet은 확장자를 제거한 파일명이므로 링크 대상도 확장자를 떼고 비교한다.
+      const normalized = target.replace(/\.[^.]+$/, '').toLowerCase();
+      if (!slugSet.has(normalized)) add('warn', page.rel, `깨진 wikilink: [[${target}]]`);
     }
   }
 

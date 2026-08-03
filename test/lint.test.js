@@ -158,6 +158,41 @@ test('lintVault resolves wikilinks case-insensitively (Obsidian behavior)', () =
   assert.equal(warns.some((result) => /등재되지 않은 페이지.*rag/.test(result.detail)), false);
 });
 
+test('lintVault treats empty list fields as present, not missing', () => {
+  const root = makeVault();
+  // tags/sources를 빈 블록 리스트로 둔다 — 계약은 "존재"만 요구하므로 error 아님.
+  fs.writeFileSync(path.join(root, 'wiki/concepts/rag.md'),
+    '---\ntitle: RAG\ntype: concept\nstatus: draft\ncreated: 2026-04-13\nupdated: 2026-04-13\ntags:\nsources:\n---\n\n# RAG\n');
+  fs.appendFileSync(path.join(root, 'index.md'), '- [[rag]] — 요약\n');
+  const errors = levels(lintVault(root), 'error');
+  assert.equal(errors.some((result) => /필수 frontmatter 누락/.test(result.detail)), false);
+});
+
+test('lintVault flags pages outside the four type directories', () => {
+  const root = makeVault();
+  // wiki/ 바로 아래 페이지 — 스키마상 위치가 없다.
+  writePage(root, 'wiki/loose.md', {
+    title: 'Loose', type: 'concept', status: 'active', created: '2026-04-13', updated: '2026-04-13',
+    tags: ['llm'], sources: ['raw/articles/karpathy.md'],
+  }, '# Loose\n');
+  const errors = levels(lintVault(root), 'error');
+  assert.ok(errors.some((result) => /타입 디렉터리.*밖에 있습니다/.test(result.detail)));
+});
+
+test('lintVault resolves extension-bearing wikilinks but flags unknown ones', () => {
+  const root = makeVault();
+  writePage(root, 'wiki/sources/karpathy.md', {
+    title: 'K', type: 'source', status: 'active', created: '2026-04-13', updated: '2026-04-13',
+    tags: ['llm'], sources: ['raw/articles/karpathy.md'],
+  }, '# K\n\n[[andrej-karpathy.md]] 존재. [[missing.md]] 없음.\n');
+  fs.appendFileSync(path.join(root, 'index.md'), '- [[karpathy]] — 요약\n');
+  const warns = levels(lintVault(root), 'warn');
+  // 확장자만 붙은 링크는 파일명으로 해소되므로 존재하는 건 통과.
+  assert.equal(warns.some((result) => /\[\[andrej-karpathy\.md\]\]/.test(result.detail)), false);
+  // 존재하지 않는 확장자 링크는 여전히 깨진 링크로 보고.
+  assert.ok(warns.some((result) => /깨진 wikilink: \[\[missing\.md\]\]/.test(result.detail)));
+});
+
 test('lintVault reports missing vault path', () => {
   const results = lintVault(path.join(tmpDir(), 'does-not-exist'));
   assert.ok(levels(results, 'error').some((result) => /볼트 경로가 없습니다/.test(result.detail)));

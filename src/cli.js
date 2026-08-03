@@ -409,16 +409,17 @@ function resolveTargets(paths, name) {
 function lintVaults(paths, args = []) {
   const { options, rest } = parseOptions(args, { allowed: ['json'], booleans: ['json'], usage: 'llmwiki vault lint [name] [--json]' });
   const targets = resolveTargets(paths, rest[0]);
-  if (!targets.length) {
-    console.log('등록된 볼트가 없습니다. `llmwiki vault add`로 추가하세요.');
-    return;
-  }
-
   const report = targets.map((vault) => ({ vault: vault.name, path: vault.path, kind: vault.kind, results: lintVault(vault.path) }));
 
+  // --json은 볼트가 없어도 기계 판독 형식을 유지한다(CI 소비자 계약).
   if (options.json) {
     console.log(JSON.stringify({ registry: paths.registry, vaults: report }, null, 2));
     if (report.some((entry) => entry.results.some((result) => result.level === 'error'))) process.exitCode = 1;
+    return;
+  }
+
+  if (!targets.length) {
+    console.log('등록된 볼트가 없습니다. `llmwiki vault add`로 추가하세요.');
     return;
   }
 
