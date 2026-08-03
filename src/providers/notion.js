@@ -173,8 +173,9 @@ function multiSelect(values) {
 
 /**
  * 위키 페이지 frontmatter를 Notion 데이터베이스 속성으로 매핑한다. 순수 함수.
- * title→title, tags→multi_select, status/type→select, created/updated→date, source_url→url.
- * titleProp는 대상 DB의 title 속성 이름(기본 'Name').
+ * title→title, tags→multi_select, status/type/confidence→select, created/updated→date,
+ * summary→rich_text, source_url→url. titleProp는 대상 DB의 title 속성 이름(기본 'Name').
+ * summary/confidence는 스키마상 선택 필드라 없으면 생략된다(대상 DB에 해당 컬럼이 있어야 채워짐).
  */
 export function frontmatterToProperties(fields, { titleProp = 'Name' } = {}) {
   const props = {};
@@ -183,6 +184,8 @@ export function frontmatterToProperties(fields, { titleProp = 'Name' } = {}) {
   if (fields.type) props.Type = { select: { name: String(fields.type) } };
   if (fields.status) props.Status = { select: { name: String(fields.status) } };
   if (Array.isArray(fields.tags) && fields.tags.length) props.Tags = multiSelect(fields.tags);
+  if (fields.summary) props.Summary = { rich_text: [{ type: 'text', text: { content: String(fields.summary) } }] };
+  if (fields.confidence) props.Confidence = { select: { name: String(fields.confidence) } };
   if (fields.created) props.Created = { date: { start: String(fields.created) } };
   if (fields.updated) props.Updated = { date: { start: String(fields.updated) } };
   if (fields.source_url) props['Source URL'] = { url: String(fields.source_url) };

@@ -305,6 +305,27 @@ llmwiki publish personal             # 없는/바뀐 페이지만 push (저장�
 - `kind: secure` 볼트는 `remote.json`에 `"allowPublish": true`가 있어야 하고, push 전 확인·익명화 게이트를 거칩니다.
 - Notion provider는 `@notionhq/client`가 필요합니다(선택 의존성): `npm i @notionhq/client`.
 
+#### Notion 데이터베이스 속성과 뷰
+
+각 위키 페이지는 대상 DB의 **한 행(page)**으로 발행되고, frontmatter는 아래 속성으로 매핑됩니다. Notion은 속성을 자동 생성하지 않으므로, **대상 DB에 아래 컬럼을 미리 만들어 두어야** 값이 채워집니다(없는 컬럼은 무시됨).
+
+| frontmatter | Notion 속성 | 타입 |
+|---|---|---|
+| `title` | `Name`(또는 `titleProperty`) | Title |
+| `type` | `Type` | Select (entity/concept/source/analysis) |
+| `status` | `Status` | Select (active/draft/archived) |
+| `tags` | `Tags` | Multi-select |
+| `summary` | `Summary` | Text |
+| `confidence` | `Confidence` | Select (low/medium/high) |
+| `created` / `updated` | `Created` / `Updated` | Date |
+| `source_url` | `Source URL` | URL |
+
+권장 뷰 구성(발행은 단방향이라 Notion에서 뷰를 바꿔도 로컬·발행 로직에 영향 없음):
+
+- **Table** — 기본 정본 뷰. `Updated` 내림차순 정렬, `Status ≠ archived` 필터. `Summary` 컬럼을 켜면 페이지를 열지 않고 내용을 스캔할 수 있습니다.
+- **Board** — `Type`으로 그룹핑해 entity/concept/source/analysis 네 축을 한눈에 봅니다.
+- **List** — `Updated` 최신순 상위 N개로 "최근 작업" 빠른 접근.
+
 ### 새 provider 추가
 
 원격 대상을 늘리려면 `src/providers/<name>.js`에 provider 인터페이스(`createClient`, 출력용 `createRemotePage`/`updateRemotePage`, 입력용 `listInboxItems`/`itemId`/`fetchInboxNote`)를 구현하고 `src/providers/index.js` 레지스트리에 한 줄 등록합니다. `sync`/`inbox` 오케스트레이터와 diff·상태 로직은 provider-중립이라 그대로 재사용됩니다. 볼트는 `remote.json`의 `provider` 값만 바꾸면 됩니다.

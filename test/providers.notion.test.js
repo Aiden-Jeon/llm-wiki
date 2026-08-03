@@ -51,6 +51,8 @@ test('frontmatterToProperties maps fields to typed Notion properties', () => {
     type: 'concept',
     status: 'active',
     tags: ['llm', 'rag'],
+    summary: 'Retrieval-augmented generation',
+    confidence: 'high',
     created: '2024-01-15',
     updated: '2026-08-03',
     source_url: 'http://x',
@@ -59,6 +61,8 @@ test('frontmatterToProperties maps fields to typed Notion properties', () => {
   assert.equal(props.Type.select.name, 'concept');
   assert.equal(props.Status.select.name, 'active');
   assert.deepEqual(props.Tags.multi_select.map((t) => t.name), ['llm', 'rag']);
+  assert.equal(props.Summary.rich_text[0].text.content, 'Retrieval-augmented generation');
+  assert.equal(props.Confidence.select.name, 'high');
   assert.equal(props.Created.date.start, '2024-01-15');
   assert.equal(props['Source URL'].url, 'http://x');
 });
@@ -67,6 +71,12 @@ test('frontmatterToProperties respects a custom title property name and omits em
   const props = frontmatterToProperties({ title: 'X', tags: [] }, { titleProp: 'Title' });
   assert.ok(props.Title.title);
   assert.equal(props.Tags, undefined);
+});
+
+test('frontmatterToProperties omits optional summary/confidence when absent', () => {
+  const props = frontmatterToProperties({ title: 'X' });
+  assert.equal(props.Summary, undefined);
+  assert.equal(props.Confidence, undefined);
 });
 
 test('chunkBlocks splits at the 100-block limit', () => {
