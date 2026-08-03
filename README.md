@@ -152,8 +152,8 @@ CLI는 사용자 데이터 디렉터리에 관리형 실행 워크스페이스�
 | `llmwiki [claude\|codex]` | 통합 라우터 시작 |
 | `llmwiki new <입력>` | 에이전트를 띄워 URL/파일/텍스트를 ingest |
 | `llmwiki capture [options]` | 자유 텍스트 메모를 볼트 `raw/notes/`에 저장 |
-| `llmwiki sync [vault] [--dry-run]` | 로컬 위키를 Notion으로 단방향 push |
-| `llmwiki inbox pull [vault] [--dry-run]` | Notion inbox의 새 항목을 가져옴 |
+| `llmwiki sync [vault] [--dry-run]` | 로컬 위키를 원격(provider)으로 단방향 push |
+| `llmwiki inbox pull [vault] [--dry-run]` | 원격(provider) inbox의 새 항목을 가져옴 |
 
 ### 에이전트 내부 명령 (라우터 세션 안에서 실행)
 
