@@ -137,6 +137,10 @@ CLI는 사용자 데이터 디렉터리에 관리형 실행 워크스페이스�
 | `llmwiki doctor` | 설정 파일, 레지스트리 파싱 오류(줄 번호), 볼트 경로, 필수 문서, 에이전트 설치 진단 |
 | `llmwiki config path/edit` | 설정 위치 확인 및 직접 편집 |
 | `llmwiki [claude\|codex]` | 통합 라우터 시작 |
+| `llmwiki new <입력>` | 에이전트를 띄워 URL/파일/텍스트를 ingest |
+| `llmwiki capture [options]` | 자유 텍스트 메모를 볼트 `raw/notes/`에 저장 |
+| `llmwiki sync [vault] [--dry-run]` | 로컬 위키를 Notion으로 단방향 push |
+| `llmwiki inbox pull [vault] [--dry-run]` | Notion inbox의 새 항목을 가져옴 |
 
 ### 에이전트 내부 명령 (라우터 세션 안에서 실행)
 
@@ -198,6 +202,44 @@ llmwiki skill remove linkedin-draft
 이전 버전의 `linkedin-draft` 명령은 내장 명령에서 빠지고 내장 템플릿으로 이동했습니다. 계속 쓰려면 `llmwiki skill add linkedin-draft --template linkedin-draft`로 한 번 등록하세요.
 
 `SKILL.md` 프론트매터에는 `name`과 `description`이 필요합니다. `description`은 에이전트가 "언제 이 스킬을 쓸지" 판단하는 기준이므로 트리거가 되는 발화 예시를 포함하는 것이 좋습니다. 누락된 항목은 `llmwiki doctor`가 보고합니다. 스킬 이름은 내장 명령(`wiki-add`, `wiki-search`, `wiki-use`)과 중복할 수 없습니다.
+
+## 입력 소스
+
+새 정보를 볼트로 받아오는 세 가지 독립 창구입니다.
+
+```bash
+llmwiki new https://arxiv.org/abs/2501.12345   # 에이전트를 띄워 ingest 시작
+echo "회의에서 나온 아이디어" | llmwiki capture --vault personal --title "아이디어"
+llmwiki inbox pull personal --dry-run           # Notion inbox 새 항목 미리보기
+```
+
+- **`new`** 는 에이전트 세션을 열고 그 안에서 `wiki-add` 워크플로우를 시작하는 shortcut입니다. 분류·라우팅은 에이전트가 판단합니다.
+- **`capture`** 는 결정론적으로 메모를 `raw/notes/`에 저장합니다(타임스탬프 파일명). TTY에서는 프롬프트로, 파이프에서는 stdin으로 본문을 받습니다. 저장 후 바로 ingest할지 물어봅니다.
+- **`inbox pull`** 은 Notion inbox 데이터베이스의 새 항목을 `raw/notes/`로 가져오고, 이미 가져온 항목은 `_meta/notion-inbox.json`으로 중복을 막습니다.
+
+## Notion sync (결과물 발행)
+
+로컬에서 작업한 위키를 Notion에서 보여주기 위해 **단방향(local→notion)** 으로 push합니다.
+
+```bash
+export LLMWIKI_NOTION_TOKEN_PERSONAL=secret_xxx
+llmwiki sync personal --dry-run   # diff 미리보기 (토큰 없이도 가능)
+llmwiki sync personal             # 없는/바뀐 페이지만 push
+```
+
+- 볼트별 설정은 `<vault>/_meta/notion.json`에 둡니다(토큰 제외, git 커밋):
+  ```json
+  {
+    "version": 1,
+    "sync": { "databaseId": "…", "syncedSubdirs": ["wiki/entities", "wiki/concepts", "wiki/sources", "wiki/analyses"] },
+    "inbox": { "databaseId": "…" },
+    "allowSync": false
+  }
+  ```
+- **토큰은 환경 변수에만** 둡니다(파일·git 금지). 조회 순서: `notion.json`의 `tokenEnv` → `LLMWIKI_NOTION_TOKEN_<VAULT>` → `LLMWIKI_NOTION_TOKEN`.
+- 동기화 상태는 `_meta/notion-map.json`에 슬러그별 `notionPageId`·콘텐츠 해시로 기록합니다. 해시가 바뀐 페이지만 갱신하고, Notion→local 역방향이나 페이지 삭제는 하지 않습니다.
+- `kind: secure` 볼트는 `notion.json`에 `"allowSync": true`가 있어야 하고, push 전 확인·익명화 게이트를 거칩니다.
+- `@notionhq/client`는 선택 의존성이라 Notion 명령을 쓸 때만 필요합니다: `npm i @notionhq/client`.
 
 ## 설계 원칙
 

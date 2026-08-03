@@ -35,5 +35,8 @@
   ],
   "dependencies": {
     "@clack/prompts": "^0.11.0"
+  },
+  "optionalDependencies": {
+    "@notionhq/client": "^2.2.15"
   }
 }

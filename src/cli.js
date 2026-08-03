@@ -26,9 +26,22 @@ import {
   skillDir,
   validateSkillName,
 } from './skills.js';
+import {
+  formatTimestamp,
+  rawNoteFilename,
+  renderRawNote,
+  resolveCaptureVault,
+  writeRawNote,
+} from './capture.js';
+import { getNotionClient, loadNotionConfig, resolveNotionToken } from './notion.js';
+import { pushSync } from './sync.js';
+import { pullInbox } from './inbox.js';
 
 const VAULT_OPTION_KEYS = ['name', 'path', 'kind', 'signals', 'notes'];
 const VAULT_ADD_USAGE = 'llmwiki vault add --name <name> --path <path> [--kind open|secure] [--signals <신호>] [--notes <메모>]';
+const CAPTURE_USAGE = 'llmwiki capture [--vault <name>] [--title <제목>] [--text <내용>]';
+const SYNC_USAGE = 'llmwiki sync [vault] [--dry-run] [--limit <n>]';
+const INBOX_USAGE = 'llmwiki inbox pull [vault] [--dry-run] [--limit <n>]';
 const SKILL_ADD_USAGE = 'llmwiki skill add <name> [--description <설명>] [--from <경로>] [--template <name>] [--force] [--no-edit]';
 const IS_WINDOWS = process.platform === 'win32';
 
@@ -39,6 +52,10 @@ const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운영합�
   llmwiki start [claude|codex] [-- <agent args>]
   llmwiki claude [agent args]     Claude Code로 바로 시작
   llmwiki codex [agent args]      Codex로 바로 시작
+  llmwiki new <url|경로|텍스트>    에이전트를 띄워 입력을 ingest
+  llmwiki capture [options]       자유 텍스트 메모를 볼트 raw/notes/에 저장
+  llmwiki sync [vault] [--dry-run] [--limit <n>]   로컬 위키를 Notion으로 push (단방향)
+  llmwiki inbox pull [vault] [--dry-run] [--limit <n>]  Notion inbox의 새 항목을 가져옴
   llmwiki setup                   초기 설정 및 볼트 등록
   llmwiki vault add [options]     볼트 추가/수정
   llmwiki vault list [--json]     등록된 볼트 목록
@@ -91,10 +108,24 @@ skill add 옵션:
   --add-dir를 안 붙이는 경우에도 등록된 볼트는 워크스페이스의 vaults/ 심볼릭 링크로 노출됩니다.
   매핑은 설정 파일(llmwiki config path)에 저장됩니다.
 
+capture 옵션:
+  --vault <name>   대상 볼트 (미지정 시 단일 볼트면 자동, 여러 개면 선택/에러)
+  --title <제목>   메모 제목 (파일명 slug·frontmatter에 사용)
+  --text <내용>    메모 본문 (미지정 시 TTY 프롬프트, 파이프면 stdin)
+
+Notion 연동:
+  볼트별 설정은 <vault>/_meta/notion.json에 둡니다 (토큰 제외, git 커밋).
+    { "sync": { "databaseId": "…" }, "inbox": { "databaseId": "…" }, "allowSync": false }
+  sync는 대상 Notion 데이터베이스로 wiki/** 페이지를 단방향 push하고,
+  상태는 <vault>/_meta/notion-map.json에 기록합니다. secure 볼트는 allowSync: true 필요.
+  @notionhq/client는 선택 의존성입니다: npm i @notionhq/client
+
 환경 변수:
   LLM_WIKI_AGENT       기본 에이전트 (claude 또는 codex)
   LLM_WIKI_CONFIG_HOME 설정 디렉터리 재정의
-  LLM_WIKI_DATA_HOME   런타임 데이터 디렉터리 재정의`;
+  LLM_WIKI_DATA_HOME   런타임 데이터 디렉터리 재정의
+  LLMWIKI_NOTION_TOKEN            Notion 토큰 (모든 볼트 공통 폴백)
+  LLMWIKI_NOTION_TOKEN_<VAULT>    볼트별 Notion 토큰 (예: LLMWIKI_NOTION_TOKEN_PERSONAL)`;
 
 export function parseOptions(args, { allowed, booleans = [], usage } = {}) {
   const options = {};
@@ -916,7 +947,14 @@ function doctor(paths) {
   if (results.some((result) => result.level === 'error')) process.exitCode = 1;
 }
 
-async function start(paths, requestedAgent, agentArgs = []) {
+/**
+ * 워크스페이스를 준비하고 에이전트를 실행한다. start/new의 공통 런처다.
+ * - agentArgs: 에이전트에 그대로 전달할 인자
+ * - initialPrompt: 세션 시작 시 주입할 초기 프롬프트. 기본 claude/codex는 마지막 positional
+ *   토큰으로 받는다. 커스텀 오버라이드 명령은 이 인자를 안 받을 수 있으므로 주입하지 않고,
+ *   대신 사용자가 붙여넣을 수 있게 안내만 출력한다.
+ */
+async function launchAgent(paths, requestedAgent, { agentArgs = [], initialPrompt } = {}) {
   const workspace = prepareWorkspace(paths);
   const agent = resolveAgent(paths, requestedAgent);
   const { tokens: [command, ...commandArgs], addDir } = resolveAgentCommand(paths, agent);
@@ -925,9 +963,15 @@ async function start(paths, requestedAgent, agentArgs = []) {
       .filter((vault) => fs.existsSync(vault.path))
       .flatMap((vault) => ['--add-dir', vault.path])
     : [];
-  const label = command === agent ? agent : `${agent} → ${[command, ...commandArgs].join(' ')}`;
+  const isDefaultCommand = command === agent;
+  // 기본 claude/codex만 trailing positional 프롬프트를 받는다. 오버라이드는 안내만 한다.
+  const promptArgs = initialPrompt && isDefaultCommand ? [initialPrompt] : [];
+  const label = isDefaultCommand ? agent : `${agent} → ${[command, ...commandArgs].join(' ')}`;
   console.log(`${label} 시작 (workspace: ${workspace})`);
-  const child = runAsync(command, [...commandArgs, ...vaultArgs, ...agentArgs], {
+  if (initialPrompt && !isDefaultCommand) {
+    console.log(`이 에이전트는 초기 프롬프트 주입을 지원하지 않습니다. 세션에서 아래를 붙여넣으세요:\n${initialPrompt}`);
+  }
+  const child = runAsync(command, [...commandArgs, ...vaultArgs, ...agentArgs, ...promptArgs], {
     cwd: workspace,
     stdio: 'inherit',
     env: process.env,
@@ -937,6 +981,198 @@ async function start(paths, requestedAgent, agentArgs = []) {
     child.once('exit', (exitCode, signal) => resolve(signal ? 1 : (exitCode ?? 0)));
   });
   process.exitCode = code;
+}
+
+async function start(paths, requestedAgent, agentArgs = []) {
+  return launchAgent(paths, requestedAgent, { agentArgs });
+}
+
+/**
+ * 에이전트가 실행할 ingest 초기 프롬프트를 만든다.
+ * - claude: `.claude/commands/wiki-add.md` 슬래시 명령을 그대로 부른다.
+ * - codex: 슬래시 명령이 없으므로 AGENTS.md의 wiki-add 태스크를 자연어로 지시한다.
+ */
+export function buildIngestPrompt(agent, input) {
+  if (agent === 'codex') return `wiki-add 태스크를 실행한다. 입력: ${input}`;
+  return `/wiki-add ${input}`;
+}
+
+// `llmwiki new <입력>`: 에이전트를 띄우고 ingest 워크플로우를 시작하는 shortcut.
+async function startIngest(paths, requestedAgent, inputArgs = []) {
+  const input = inputArgs.join(' ').trim();
+  if (!input) throw new Error('추가할 입력이 필요합니다.\n사용법: llmwiki new <url|경로|텍스트>');
+  const agent = resolveAgent(paths, requestedAgent);
+  return launchAgent(paths, agent, { initialPrompt: buildIngestPrompt(agent, input) });
+}
+
+// 비-TTY 입력(파이프)을 끝까지 읽는다. `echo ... | llmwiki capture --vault x`를 지원한다.
+function readStdin() {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    stdin.setEncoding('utf8');
+    stdin.on('data', (chunk) => { data += chunk; });
+    stdin.on('end', () => resolve(data));
+    stdin.on('error', reject);
+  });
+}
+
+// `llmwiki capture`: 자유 텍스트 메모를 대상 볼트의 raw/notes/에 기록하는 결정론 빠른 캡처.
+async function capture(paths, args) {
+  ensureRegistry(paths);
+  const { options, rest } = parseOptions(args, {
+    allowed: ['vault', 'title', 'text'],
+    usage: CAPTURE_USAGE,
+  });
+  if (rest.length) throw new Error(`알 수 없는 인자: ${rest.join(' ')}\n사용법: ${CAPTURE_USAGE}`);
+
+  const vaults = readRegistry(paths.registry);
+  if (!vaults.length) throw new Error('등록된 볼트가 없습니다. 먼저 `llmwiki vault add`로 볼트를 등록하세요.');
+
+  const resolved = resolveCaptureVault(vaults, options.vault);
+  let vault = resolved.vault;
+  if (!vault) {
+    if (!stdin.isTTY) throw new Error(`대상 볼트를 지정하세요.\n사용법: ${CAPTURE_USAGE}`);
+    vault = await chooseVault(vaults, '메모를 저장할 볼트를 선택하세요.');
+    if (!vault) return false;
+  }
+  if (!fs.existsSync(vault.path)) throw new Error(`볼트 경로를 찾을 수 없습니다: ${vault.path}`);
+
+  // 본문: --text > TTY 프롬프트 > 파이프 stdin.
+  let body = options.text;
+  if (body === undefined) {
+    if (stdin.isTTY) {
+      const input = await p.text({ message: '메모 내용', placeholder: '자유롭게 입력하세요.' });
+      if (cancelPrompt(input)) return false;
+      body = input;
+    } else {
+      body = await readStdin();
+    }
+  }
+  if (!String(body ?? '').trim()) throw new Error('메모 내용이 비어 있습니다.');
+
+  // secure 볼트 쓰기 게이트. 비-TTY에서 --vault 없이 secure로 해소되면 위에서 이미 막힌다.
+  if (vault.kind === 'secure') {
+    if (!options.vault && !stdin.isTTY) throw new Error('secure 볼트 쓰기는 --vault로 명시해야 합니다.');
+    if (stdin.isTTY) {
+      p.log.warn('secure 볼트입니다. 고객명·자격증명·내부 URL을 저장하지 말고 사례는 익명화하세요.');
+      const accepted = await p.confirm({ message: `${vault.name}(secure)에 메모를 저장할까요?`, initialValue: false });
+      if (cancelPrompt(accepted) || !accepted) return false;
+    }
+  }
+
+  const now = new Date();
+  const contents = renderRawNote({
+    title: options.title,
+    body,
+    source: 'capture',
+    createdAt: formatTimestamp(now),
+  });
+  const notePath = writeRawNote(vault.path, rawNoteFilename(now, options.title), contents);
+
+  const message = `메모 저장됨 · ${vault.name} → ${notePath}`;
+  if (stdin.isTTY) p.log.success(message);
+  else console.log(message);
+
+  // 선택적 ingest 다리 (세 입력 경로 중 유일한 연결). TTY에서만 제안한다.
+  if (stdin.isTTY) {
+    const ingest = await p.confirm({ message: '지금 이 노트를 ingest 할까요?', initialValue: false });
+    if (!cancelPrompt(ingest) && ingest) return startIngest(paths, undefined, [notePath]);
+  }
+  return true;
+}
+
+/**
+ * Notion 명령(sync/inbox)이 대상 볼트를 해소한다. positional 이름 우선, 없으면 단일 볼트.
+ * 여러 볼트인데 이름이 없으면 에러(Notion 쓰기는 정확히 한 볼트로 해소한다).
+ */
+function resolveNotionVault(paths, requestedName, usage) {
+  ensureRegistry(paths);
+  const vaults = readRegistry(paths.registry);
+  if (!vaults.length) throw new Error('등록된 볼트가 없습니다. 먼저 `llmwiki vault add`로 볼트를 등록하세요.');
+  const { vault, ambiguous } = resolveCaptureVault(vaults, requestedName);
+  if (ambiguous) throw new Error(`대상 볼트를 지정하세요.\n사용법: ${usage}`);
+  if (!fs.existsSync(vault.path)) throw new Error(`볼트 경로를 찾을 수 없습니다: ${vault.path}`);
+  return vault;
+}
+
+// `llmwiki sync [vault]`: 로컬 위키를 Notion 데이터베이스로 단방향 push한다.
+async function sync(paths, args) {
+  const { options, rest } = parseOptions(args, {
+    allowed: ['limit', 'dry-run'],
+    booleans: ['dry-run'],
+    usage: SYNC_USAGE,
+  });
+  if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${SYNC_USAGE}`);
+
+  const vault = resolveNotionVault(paths, rest[0], SYNC_USAGE);
+  const config = loadNotionConfig(vault.path);
+  if (!config || !config.sync || !config.sync.databaseId) {
+    throw new Error(`${vault.name} 볼트에 Notion sync 설정이 없습니다. _meta/notion.json의 sync.databaseId를 설정하세요.`);
+  }
+
+  // secure 볼트는 명시적 allowSync 없이는 거부하고, TTY에서 확인·익명화 게이트를 거친다.
+  if (vault.kind === 'secure') {
+    if (!config.allowSync) {
+      throw new Error(`${vault.name}은 secure 볼트입니다. _meta/notion.json에 "allowSync": true를 설정해야 sync할 수 있습니다.`);
+    }
+    if (stdin.isTTY) {
+      p.log.warn('secure 볼트를 Notion에 push합니다. 고객명·자격증명·내부 URL이 익명화됐는지 확인하세요.');
+      const accepted = await p.confirm({ message: `${vault.name}(secure)을 Notion으로 push할까요?`, initialValue: false });
+      if (cancelPrompt(accepted) || !accepted) return false;
+    }
+  }
+
+  const dryRun = options['dry-run'] === true;
+  const limit = options.limit ? Number.parseInt(options.limit, 10) : undefined;
+  if (options.limit && (!Number.isInteger(limit) || limit <= 0)) throw new Error('--limit은 양의 정수여야 합니다.');
+
+  // 토큰·클라이언트는 dry-run이 아닐 때만 필요하다(오프라인에서 diff 미리보기 가능).
+  const client = dryRun ? null : await getNotionClient(resolveNotionToken(process.env, vault.name, config));
+  const summary = await pushSync(vault.path, {
+    client,
+    databaseId: config.sync.databaseId,
+    subdirs: config.sync.syncedSubdirs,
+    titleProp: config.sync.titleProperty,
+    dryRun,
+    limit,
+  });
+
+  const message = dryRun
+    ? `[dry-run] ${vault.name} · 생성 예정 ${summary.planned.create} · 갱신 예정 ${summary.planned.update} · 변경 없음 ${summary.unchanged}`
+    : `sync 완료 · ${vault.name} · 생성 ${summary.created} · 갱신 ${summary.updated} · 변경 없음 ${summary.unchanged}`;
+  if (stdin.isTTY) p.log.success(message);
+  else console.log(message);
+  return true;
+}
+
+// `llmwiki inbox pull [vault]`: Notion inbox 데이터베이스의 새 항목을 raw/notes/로 가져온다.
+async function inboxPull(paths, args) {
+  const { options, rest } = parseOptions(args, {
+    allowed: ['limit', 'dry-run'],
+    booleans: ['dry-run'],
+    usage: INBOX_USAGE,
+  });
+  if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${INBOX_USAGE}`);
+
+  const vault = resolveNotionVault(paths, rest[0], INBOX_USAGE);
+  const config = loadNotionConfig(vault.path);
+  if (!config || !config.inbox || !config.inbox.databaseId) {
+    throw new Error(`${vault.name} 볼트에 Notion inbox 설정이 없습니다. _meta/notion.json의 inbox.databaseId를 설정하세요.`);
+  }
+
+  const dryRun = options['dry-run'] === true;
+  const limit = options.limit ? Number.parseInt(options.limit, 10) : undefined;
+  if (options.limit && (!Number.isInteger(limit) || limit <= 0)) throw new Error('--limit은 양의 정수여야 합니다.');
+
+  const client = await getNotionClient(resolveNotionToken(process.env, vault.name, config));
+  const result = await pullInbox(vault.path, { client, databaseId: config.inbox.databaseId, dryRun, limit });
+
+  const message = dryRun
+    ? `[dry-run] ${vault.name} · 가져올 항목 ${result.pulled.length} · 이미 있음 ${result.skipped}`
+    : `inbox pull 완료 · ${vault.name} · 가져옴 ${result.pulled.length} · 이미 있음 ${result.skipped}`;
+  if (stdin.isTTY) p.log.success(message);
+  else console.log(message);
+  return true;
 }
 
 // EDITOR는 `code -w`처럼 인자를 포함할 수 있으므로 토큰으로 나눠 사용한다.
@@ -976,6 +1212,26 @@ export async function main(args) {
     const agent = ['claude', 'codex'].includes(rest[0]) ? rest.shift() : undefined;
     if (rest[0] === '--') rest.shift();
     return start(paths, agent, rest);
+  }
+  if (command === 'new') {
+    const agent = ['claude', 'codex'].includes(rest[0]) ? rest.shift() : undefined;
+    return startIngest(paths, agent, rest);
+  }
+  if (command === 'capture') {
+    if (stdin.isTTY) p.intro('llmwiki · 메모 캡처');
+    return capture(paths, rest);
+  }
+  if (command === 'sync') {
+    if (stdin.isTTY) p.intro('llmwiki · Notion sync');
+    return sync(paths, rest);
+  }
+  if (command === 'inbox') {
+    const [action, ...inboxArgs] = rest;
+    if (action === 'pull') {
+      if (stdin.isTTY) p.intro('llmwiki · Notion inbox');
+      return inboxPull(paths, inboxArgs);
+    }
+    throw new Error(`사용법: ${INBOX_USAGE}`);
   }
   if (command === 'vault') {
     const [action, ...vaultArgs] = rest;
