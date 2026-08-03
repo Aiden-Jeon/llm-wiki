@@ -65,13 +65,13 @@ import {
 } from './git.js';
 import { applyImportBundle, readExportBundle, writeExportBundle } from './settings.js';
 
-const VAULT_OPTION_KEYS = ['name', 'path', 'kind', 'backend', 'origin', 'signals', 'notes'];
+const VAULT_OPTION_KEYS = ['name', 'path', 'backend', 'origin', 'signals', 'notes'];
 const VAULT_BOOLEAN_KEYS = [];
-const VAULT_ADD_USAGE = 'llmwiki vault add --name <name> [--path <path>] [--kind open|secure] [--backend local|git] [--origin <git-url>] [--signals <신호>] [--notes <메모>]';
+const VAULT_ADD_USAGE = 'llmwiki vault add --name <name> [--path <path>] [--backend local|git] [--origin <git-url>] [--signals <신호>] [--notes <메모>]';
 const VAULT_SYNC_USAGE = 'llmwiki vault sync [name] [--message <msg>] [--no-push] [--pull-only]';
 const CAPTURE_USAGE = 'llmwiki capture [--vault <name>] [--title <제목>] [--text <내용>]';
 const PUBLISH_USAGE = 'llmwiki publish [vault] [--dry-run] [--limit <n>]';
-const PUBLISH_ADD_USAGE = 'llmwiki publish add [vault] [--remote <provider>] [--connection <name>] [--remote-token <token>] [--publish-db <id>] [--inbox-db <id>] [--title-prop <name>] [--allow-publish]';
+const PUBLISH_ADD_USAGE = 'llmwiki publish add [vault] [--remote <provider>] [--connection <name>] [--remote-token <token>] [--publish-db <id>] [--inbox-db <id>] [--title-prop <name>]';
 const PUBLISH_REMOVE_USAGE = 'llmwiki publish remove [vault] [--purge-token | --keep-token]';
 const PUBLISH_LIST_USAGE = 'llmwiki publish list [--json]';
 const PUBLISH_VIEW_USAGE = 'llmwiki publish view [vault]';
@@ -128,7 +128,7 @@ const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운영합�
   llmwiki config import <file> [--vaults-dir <dir>] [--force]  다른 머신의 설정 가져오기
 
 vault add 옵션:
-  --name <name> [--path <path>] [--kind open|secure]
+  --name <name> [--path <path>]
   [--backend local|git] [--origin <git-url>]
   [--signals <쉼표 구분 신호>] [--notes <메모>]
   원격 발행 연결은 볼트와 분리돼 있습니다 → llmwiki publish add <vault> 참고.
@@ -144,10 +144,6 @@ skill add 옵션:
   --template <name>      내장 템플릿에서 생성 (llmwiki skill templates)
   --force                같은 이름의 스킬을 덮어씀
   --no-edit              생성 후 편집기를 열지 않음
-
-볼트 종류:
-  open    일반 자료용. 별도의 보안 확인 없이 읽고 쓸 수 있음
-  secure  업무·고객·개인정보 등 민감 자료용. 쓰기 전 확인 및 익명화 적용
 
 추가 정보:
   signals 요청을 이 볼트로 자동 연결할 주제·키워드 (예: 커리어, 이력서, 논문)
@@ -173,14 +169,14 @@ capture 옵션:
 원격 연동 (publish/inbox):
   발행 설정은 볼트와 분리돼 전역 config의 publish.json에 볼트 이름으로 둡니다 (토큰 제외).
     { "version": 1, "vaults": { "personal": { "provider": "notion",
-        "publish": { "databaseId": "…" }, "inbox": { "databaseId": "…" }, "allowPublish": false } } }
+        "publish": { "databaseId": "…" }, "inbox": { "databaseId": "…" } } } }
   llmwiki publish add <vault>로 이 엔트리를 생성하고 토큰을 secrets.json(0600)에 저장합니다.
   대화형(TTY)이면 대상 데이터베이스를 새로 만들거나 기존 목록에서 고를 수 있어(DB id 직접 입력 불필요),
   비대화형은 --publish-db/--inbox-db로 id를 직접 지정합니다.
   provider가 원격 대상을 결정합니다(현재 지원: notion). publish는 wiki/** 페이지를
   단방향 push해 view를 발행하고, 발행 상태는 <vault>/_meta/remote-map.json에 기록합니다
   (설정=전역, 상태=볼트: 상태는 git 볼트와 함께 이동해 여러 머신에서 중복 발행을 막습니다).
-  secure 볼트는 allowPublish: true 필요. Notion provider는 @notionhq/client가 필요합니다:
+  Notion provider는 @notionhq/client가 필요합니다:
   npm i @notionhq/client
 
 토큰 저장·해소 순서 (앞이 우선):
@@ -328,23 +324,13 @@ async function askVault(paths, initial = {}, { edit = false } = {}) {
     if (cancelPrompt(vaultPath)) return null;
   }
 
-  const normalizedPath = normalizeVault({ name, path: vaultPath, kind: initial.kind || 'open' }).path;
+  const normalizedPath = normalizeVault({ name, path: vaultPath }).path;
   const status = inspectVault(normalizedPath);
   if (status.exists) {
     p.log.success(`경로 확인 · CLAUDE.md ${status.claude ? '✓' : '–'} · AGENTS.md ${status.agents ? '✓' : '–'} · index.md ${status.index ? '✓' : '–'}`);
   } else {
     p.log.warn('아직 존재하지 않는 경로입니다. 등록은 가능하지만 사용 전에 생성해야 합니다.');
   }
-
-  const kind = !edit && initial.kind !== undefined ? initial.kind : await p.select({
-    message: '볼트 종류',
-    initialValue: initial.kind || 'open',
-    options: [
-      { value: 'open', label: 'Open', hint: '일반 자료 · 별도 보안 확인 없이 읽기/쓰기' },
-      { value: 'secure', label: 'Secure', hint: '민감 자료 · 쓰기 전 확인 및 익명화' },
-    ],
-  });
-  if (cancelPrompt(kind)) return null;
 
   const signals = !edit && initial.signals !== undefined ? initial.signals : await p.text({
     message: '라우팅 신호',
@@ -362,11 +348,10 @@ async function askVault(paths, initial = {}, { edit = false } = {}) {
   });
   if (cancelPrompt(notes)) return null;
 
-  const vault = normalizeVault({ name, path: vaultPath, kind, backend, origin, signals, notes });
+  const vault = normalizeVault({ name, path: vaultPath, backend, origin, signals, notes });
   console.log(renderNote([
     `이름    ${vault.name}`,
     `경로    ${vault.path}`,
-    `종류    ${vault.kind}`,
     `백엔드  ${vault.backend}${vault.origin ? ` · ${vault.origin}` : ''}`,
     `신호    ${vault.signals || '없음'}`,
     `메모    ${vault.notes || '없음'}`,
@@ -648,25 +633,6 @@ export async function configureRemote(paths, vault, opts = {}, { getProvider: re
     return false;
   }
 
-  // secure 볼트는 publish(민감 방향)에 명시적 allowPublish가 필요하다. 없으면 inbox만 설정한다.
-  if (publishDb && vault.kind === 'secure') {
-    let allowPublish;
-    if (tty) {
-      p.log.warn(`secure 볼트를 ${provider.name}에 push하게 됩니다. 고객명·자격증명·내부 URL 익명화를 확인하세요.`);
-      const ok = await p.confirm({ message: `${vault.name}(secure) publish를 활성화할까요?`, initialValue: false });
-      if (cancelPrompt(ok)) return false;
-      allowPublish = ok === true;
-    } else {
-      allowPublish = opts['allow-publish'] === true;
-    }
-    if (!allowPublish) {
-      const note = 'secure 볼트 publish에는 allowPublish(--allow-publish 또는 확인)가 필요합니다. inbox만 설정합니다.';
-      if (tty) p.log.warn(note); else console.error(note);
-      publishDb = '';
-      if (!inboxDb) return false;
-    }
-  }
-
   // 비-대화형 경로는 대상 DB의 존재를 여기서 확인한다(대화형은 목록/생성 과정에서 이미 확인됨).
   if (!interactive && typeof provider.verifyDatabase === 'function') {
     if (publishDb) await provider.verifyDatabase(client, { databaseId: publishDb });
@@ -681,7 +647,6 @@ export async function configureRemote(paths, vault, opts = {}, { getProvider: re
     patch.publish = { databaseId: publishDb };
     const titleProp = opts['title-prop'] || publishTitleProp;
     if (titleProp) patch.publish.titleProperty = titleProp;
-    if (vault.kind === 'secure') patch.allowPublish = true;
   }
   if (inboxDb) patch.inbox = { databaseId: inboxDb };
   upsertRemoteConfig(paths.publish, vault.name, patch);
@@ -781,8 +746,7 @@ async function selectRemoteDatabase(provider, client, { label, checkSchema, defa
  */
 async function publishAdd(paths, args) {
   const { options, rest } = parseOptions(args, {
-    allowed: ['remote', 'connection', 'remote-token', 'publish-db', 'inbox-db', 'title-prop', 'allow-publish'],
-    booleans: ['allow-publish'],
+    allowed: ['remote', 'connection', 'remote-token', 'publish-db', 'inbox-db', 'title-prop'],
     usage: PUBLISH_ADD_USAGE,
   });
   if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${PUBLISH_ADD_USAGE}`);
@@ -813,7 +777,6 @@ function publishList(paths, args) {
     if (c.connection) parts.push(`연결=${c.connection}`);
     if (c.publish && c.publish.databaseId) parts.push(`publish=${c.publish.databaseId}`);
     if (c.inbox && c.inbox.databaseId) parts.push(`inbox=${c.inbox.databaseId}`);
-    if (c.allowPublish) parts.push('allowPublish');
     console.log(`${name} · ${c.provider || DEFAULT_PROVIDER}${parts.length ? ` · ${parts.join(' · ')}` : ''}`);
   }
   return true;
@@ -1108,21 +1071,21 @@ function listVaults(paths, args = []) {
       // p.note는 박스 폭을 문자열 길이로 계산해 CJK(2칸)·긴 URL에서 오른쪽 테두리가
       // 틀어진다. displayWidth 기반의 renderNote로 같은 박스를 정렬 맞춰 그린다.
       console.log(renderNote([
-        `${vault.kind} · ${backend} · ${status.exists ? '경로 정상' : '경로 없음'}`,
+        `${backend} · ${status.exists ? '경로 정상' : '경로 없음'}`,
         vault.path,
         `신호: ${vault.signals || '없음'}`,
       ].join('\n'), vault.name));
     }
     p.outro('상세 정보: llmwiki vault show <name>');
   } else {
-    console.table(vaults.map(({ name, path: vaultPath, kind, backend, origin, signals }) => ({ name, kind, backend, origin, path: vaultPath, signals })));
+    console.table(vaults.map(({ name, path: vaultPath, backend, origin, signals }) => ({ name, backend, origin, path: vaultPath, signals })));
   }
 }
 
 async function chooseVault(vaults, message) {
   const name = await p.select({
     message,
-    options: vaults.map((vault) => ({ value: vault.name, label: vault.name, hint: vault.kind })),
+    options: vaults.map((vault) => ({ value: vault.name, label: vault.name, hint: vault.signals || undefined })),
   });
   if (cancelPrompt(name)) return null;
   return vaults.find((vault) => vault.name === name);
@@ -1137,7 +1100,6 @@ function showVault(paths, name) {
   const status = inspectVault(vault.path);
   const details = [
     `이름       ${vault.name}`,
-    `종류       ${vault.kind}`,
     `백엔드     ${vault.backend}${vault.origin ? ` · ${vault.origin}` : ''}`,
     `경로       ${vault.path}`,
     `라우팅 신호 ${vault.signals || '없음'}`,
@@ -1180,7 +1142,7 @@ function resolveTargets(paths, name) {
 function lintVaults(paths, args = []) {
   const { options, rest } = parseOptions(args, { allowed: ['json'], booleans: ['json'], usage: 'llmwiki vault lint [name] [--json]' });
   const targets = resolveTargets(paths, rest[0]);
-  const report = targets.map((vault) => ({ vault: vault.name, path: vault.path, kind: vault.kind, results: lintVault(vault.path) }));
+  const report = targets.map((vault) => ({ vault: vault.name, path: vault.path, results: lintVault(vault.path) }));
 
   // --json은 볼트가 없어도 기계 판독 형식을 유지한다(CI 소비자 계약).
   if (options.json) {
@@ -1199,7 +1161,7 @@ function lintVaults(paths, args = []) {
     const entryErrors = entry.results.filter((result) => result.level === 'error').length;
     errors += entryErrors;
     if (stdin.isTTY) {
-      p.intro(`llmwiki vault lint · ${entry.vault} (${entry.kind})`);
+      p.intro(`llmwiki vault lint · ${entry.vault}`);
       for (const result of entry.results) p.log[result.level](`${result.label} · ${result.detail}`);
       p.outro(entryErrors ? `${entry.vault}: 위반 ${entryErrors}개` : `${entry.vault}: 스키마 위반 없음`);
     } else {
@@ -1239,16 +1201,6 @@ async function scaffoldVaults(paths, args = []) {
   }
 
   for (const vault of targets) {
-    if (vault.kind === 'secure') {
-      if (!rest[0] && !stdin.isTTY) {
-        throw new Error('secure 볼트 scaffold는 볼트 이름을 명시해야 합니다: llmwiki vault scaffold <name>');
-      }
-      if (stdin.isTTY) {
-        p.log.warn(`${vault.name}은 secure 볼트입니다. 스키마 파일과 디렉터리를 추가합니다.`);
-        const accepted = await p.confirm({ message: `${vault.name}(secure)에 scaffold를 적용할까요?`, initialValue: false });
-        if (cancelPrompt(accepted) || !accepted) continue;
-      }
-    }
     fs.mkdirSync(vault.path, { recursive: true });
     const created = [];
     scaffoldTree(paths.vaultTemplateDir, vault.path, vault.path, created);
@@ -1717,7 +1669,7 @@ function doctor(paths) {
       else if (vault.backend === 'git' && !isGitRepo(vault.path)) {
         add('warn', vault.name, `git 백엔드지만 git 저장소가 아님 · ${vault.path}`);
       } else if (!status.claude) add('warn', vault.name, `경로 정상 · CLAUDE.md 없음 · ${backendLabel}`);
-      else add('success', vault.name, `정상 · ${vault.kind} · ${backendLabel} · index.md ${status.index ? '있음' : '없음'}`);
+      else add('success', vault.name, `정상 · ${backendLabel} · index.md ${status.index ? '있음' : '없음'}`);
     }
   }
 
@@ -1855,16 +1807,6 @@ async function capture(paths, args) {
   }
   if (!String(body ?? '').trim()) throw new Error('메모 내용이 비어 있습니다.');
 
-  // secure 볼트 쓰기 게이트. 비-TTY에서 --vault 없이 secure로 해소되면 위에서 이미 막힌다.
-  if (vault.kind === 'secure') {
-    if (!options.vault && !stdin.isTTY) throw new Error('secure 볼트 쓰기는 --vault로 명시해야 합니다.');
-    if (stdin.isTTY) {
-      p.log.warn('secure 볼트입니다. 고객명·자격증명·내부 URL을 저장하지 말고 사례는 익명화하세요.');
-      const accepted = await p.confirm({ message: `${vault.name}(secure)에 메모를 저장할까요?`, initialValue: false });
-      if (cancelPrompt(accepted) || !accepted) return false;
-    }
-  }
-
   const now = new Date();
   const contents = renderRawNote({
     title: options.title,
@@ -1937,18 +1879,6 @@ async function publish(paths, args) {
   const vault = await resolveRemoteVault(paths, rest[0], PUBLISH_USAGE);
   if (!vault) return false;
   const { config, provider } = resolveRemote(paths, vault, 'publish');
-
-  // secure 볼트는 명시적 allowPublish 없이는 거부하고, TTY에서 확인·익명화 게이트를 거친다.
-  if (vault.kind === 'secure') {
-    if (!config.allowPublish) {
-      throw new Error(`${vault.name}은 secure 볼트입니다. \`llmwiki publish add ${vault.name} --allow-publish\`로 발행을 활성화해야 합니다.`);
-    }
-    if (stdin.isTTY) {
-      p.log.warn(`secure 볼트를 ${provider.name}에 발행합니다. 고객명·자격증명·내부 URL이 익명화됐는지 확인하세요.`);
-      const accepted = await p.confirm({ message: `${vault.name}(secure)을 ${provider.name}으로 발행할까요?`, initialValue: false });
-      if (cancelPrompt(accepted) || !accepted) return false;
-    }
-  }
 
   const dryRun = options['dry-run'] === true;
   const limit = parseLimit(options);
@@ -2048,16 +1978,6 @@ async function inboxPull(paths, args) {
 
   const dryRun = options['dry-run'] === true;
   const limit = parseLimit(options);
-
-  // dry-run은 읽기 전용이다. 실제 파일 기록은 capture와 같은 secure 쓰기 게이트를 거친다.
-  if (!dryRun && vault.kind === 'secure') {
-    if (!rest[0] && !stdin.isTTY) throw new Error('secure 볼트 inbox pull은 볼트 이름을 명시해야 합니다.');
-    if (stdin.isTTY) {
-      p.log.warn('secure 볼트에 원격 inbox 내용을 저장합니다. 고객명·자격증명·내부 URL이 포함되지 않았는지 확인하세요.');
-      const accepted = await p.confirm({ message: `${vault.name}(secure)에 inbox 항목을 저장할까요?`, initialValue: false });
-      if (cancelPrompt(accepted) || !accepted) return false;
-    }
-  }
 
   const client = await provider.createClient(
     resolveRemoteToken(process.env, { prefix: provider.tokenPrefix, vaultName: vault.name, config, secretsPath: paths.secrets, provider: provider.name }),

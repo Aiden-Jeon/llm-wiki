@@ -8,8 +8,8 @@ export const REGISTRY_HEADER = `# 볼트 레지스트리
 
 backend는 \`local\`(그냥 폴더) 또는 \`git\`(git repo, \`llmwiki vault sync\`로 동기화)입니다. origin은 git backend의 원격 URL입니다.
 
-| name | path | kind | backend | origin | signals | notes |
-|------|------|------|---------|--------|---------|-------|`;
+| name | path | backend | origin | signals | notes |
+|------|------|---------|--------|---------|-------|`;
 
 // 논리 에이전트 이름 → 실제 실행 명령을 재정의할 수 있는 대상.
 export const SUPPORTED_AGENTS = ['claude', 'codex'];
@@ -41,8 +41,6 @@ export function normalizeVault(vault) {
     ? path.join(os.homedir(), rawPath.slice(2))
     : rawPath;
   const vaultPath = path.resolve(expandedPath);
-  const kind = validateField('kind', vault.kind || 'open');
-  if (!['open', 'secure'].includes(kind)) throw new Error('kind는 open 또는 secure여야 합니다.');
 
   const backend = validateField('backend', vault.backend || 'local');
   if (!['local', 'git'].includes(backend)) throw new Error('backend는 local 또는 git여야 합니다.');
@@ -55,7 +53,6 @@ export function normalizeVault(vault) {
   return {
     name,
     path: vaultPath,
-    kind,
     backend,
     origin,
     signals: validateField('signals', vault.signals),
@@ -132,15 +129,22 @@ export function parseRegistryFile(content) {
       continue;
     }
 
-    // 7컬럼(현행)과 5컬럼(레거시: backend/origin 없이 저장된 파일)을 모두 받는다.
+    // 6컬럼(현행)과 4컬럼(레거시: backend/origin 없이 저장된 파일)을 받는다.
+    // 과거 kind 열이 있던 7컬럼/5컬럼도 하위 호환으로 읽되 kind 셀은 조용히 버린다.
     // 레거시 행은 backend=local, origin=''로 승격한다.
     let fields;
-    if (cells.length === 7) {
-      fields = { name: cells[0], path: cells[1], kind: cells[2], backend: cells[3], origin: cells[4], signals: cells[5], notes: cells[6] };
+    if (cells.length === 6) {
+      fields = { name: cells[0], path: cells[1], backend: cells[2], origin: cells[3], signals: cells[4], notes: cells[5] };
+    } else if (cells.length === 4) {
+      fields = { name: cells[0], path: cells[1], backend: 'local', origin: '', signals: cells[2], notes: cells[3] };
+    } else if (cells.length === 7) {
+      // 레거시 kind 열(cells[2])을 버리고 나머지를 매핑한다.
+      fields = { name: cells[0], path: cells[1], backend: cells[3], origin: cells[4], signals: cells[5], notes: cells[6] };
     } else if (cells.length === 5) {
-      fields = { name: cells[0], path: cells[1], kind: cells[2], backend: 'local', origin: '', signals: cells[3], notes: cells[4] };
+      // 레거시 kind 열(cells[2])을 버리고 backend=local, origin=''로 승격한다.
+      fields = { name: cells[0], path: cells[1], backend: 'local', origin: '', signals: cells[3], notes: cells[4] };
     } else {
-      issues.push({ line: lineNumber, raw, message: `열이 7개(name/path/kind/backend/origin/signals/notes) 또는 5개(레거시) 필요하지만 ${cells.length}개입니다.` });
+      issues.push({ line: lineNumber, raw, message: `열이 6개(name/path/backend/origin/signals/notes) 또는 4개(레거시) 필요하지만 ${cells.length}개입니다.` });
       continue;
     }
 
@@ -179,7 +183,7 @@ export function formatIssues(file, issues) {
 export function renderRegistry(vaults, agents = []) {
   const vaultRows = vaults.map((vault) => {
     const v = normalizeVault(vault);
-    return `| ${v.name} | ${v.path} | ${v.kind} | ${v.backend} | ${v.origin} | ${v.signals} | ${v.notes} |`;
+    return `| ${v.name} | ${v.path} | ${v.backend} | ${v.origin} | ${v.signals} | ${v.notes} |`;
   });
   let out = `${REGISTRY_HEADER}\n${vaultRows.length ? `${vaultRows.join('\n')}\n` : ''}`;
   if (agents.length) {

@@ -105,7 +105,6 @@ description: ${yamlQuote(description || `TODO: 이 스킬을 언제 사용하는
 ## 주의
 
 - 근거에 없는 내용을 만들지 않는다.
-- \`kind: secure\` 볼트에서 raw 민감 자료를 끌어오지 않는다.
 `;
 }
 
@@ -124,7 +123,7 @@ description: ${yamlQuote(summary)}
 
 \`${skill.name}\` 스킬을 호출한다. 정본 워크플로우는 \`.claude/skills/${skill.name}/${SKILL_FILE}\`를 따른다.
 
-대상 볼트는 \`WIKI-CLI.md\`의 라우팅 절차로 해소한다. \`kind: secure\` 볼트는 쓰기 전 확인·익명화 게이트를 거친다.
+대상 볼트는 \`WIKI-CLI.md\`의 라우팅 절차로 해소한다.
 
 요청: $ARGUMENTS
 `;

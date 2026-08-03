@@ -12,7 +12,6 @@ test('registry markdown round-trip', () => {
   const input = [{
     name: 'personal',
     path: '/tmp/my-wiki',
-    kind: 'open',
     backend: 'local',
     origin: '',
     signals: 'career, AI',
@@ -25,7 +24,6 @@ test('registry round-trips a git backend vault with origin', () => {
   const input = [{
     name: 'gwiki',
     path: '/tmp/gwiki',
-    kind: 'open',
     backend: 'git',
     origin: 'git@github.com:me/wiki.git',
     signals: '',
@@ -44,11 +42,11 @@ test('registry validates backend/origin coupling', () => {
   assert.equal(v.origin, '');
 });
 
-test('registry promotes legacy 5-column rows to backend=local', () => {
+test('registry promotes legacy 4-column rows to backend=local', () => {
   const content = [
-    '| name | path | kind | signals | notes |',
-    '|------|------|------|---------|-------|',
-    '| old | /tmp/old | open | sig | note |',
+    '| name | path | signals | notes |',
+    '|------|------|---------|-------|',
+    '| old | /tmp/old | sig | note |',
   ].join('\n');
   const { vaults, issues } = parseRegistryFile(content);
   assert.equal(issues.length, 0);
@@ -57,55 +55,87 @@ test('registry promotes legacy 5-column rows to backend=local', () => {
   assert.equal(vaults[0].signals, 'sig');
 });
 
+test('registry reads legacy kind columns, dropping the kind cell (7-col)', () => {
+  const content = [
+    '| name | path | kind | backend | origin | signals | notes |',
+    '|------|------|------|---------|--------|---------|-------|',
+    '| g | /tmp/g | secure | git | git@x:y.git | sig | note |',
+  ].join('\n');
+  const { vaults, issues } = parseRegistryFile(content);
+  assert.equal(issues.length, 0);
+  assert.equal(vaults.length, 1);
+  assert.equal(vaults[0].name, 'g');
+  assert.equal(vaults[0].backend, 'git');
+  assert.equal(vaults[0].origin, 'git@x:y.git');
+  assert.equal(vaults[0].signals, 'sig');
+  assert.equal(vaults[0].notes, 'note');
+  assert.ok(!('kind' in vaults[0]));
+});
+
+test('registry reads legacy kind columns, dropping the kind cell (5-col)', () => {
+  const content = [
+    '| name | path | kind | signals | notes |',
+    '|------|------|------|---------|-------|',
+    '| old | /tmp/old | secure | sig | note |',
+  ].join('\n');
+  const { vaults, issues } = parseRegistryFile(content);
+  assert.equal(issues.length, 0);
+  assert.equal(vaults[0].backend, 'local');
+  assert.equal(vaults[0].origin, '');
+  assert.equal(vaults[0].signals, 'sig');
+  assert.equal(vaults[0].notes, 'note');
+  assert.ok(!('kind' in vaults[0]));
+});
+
 test('registry expands POSIX and Windows-style home-relative vault paths', () => {
-  const posixVault = normalizeVault({ name: 'posix', path: '~/wiki', kind: 'open' });
-  const windowsVault = normalizeVault({ name: 'windows', path: '~\\wiki', kind: 'open' });
+  const posixVault = normalizeVault({ name: 'posix', path: '~/wiki' });
+  const windowsVault = normalizeVault({ name: 'windows', path: '~\\wiki' });
   assert.equal(posixVault.path, path.join(os.homedir(), 'wiki'));
   assert.equal(windowsVault.path, path.join(os.homedir(), 'wiki'));
 });
 
-test('registry rejects invalid secure kind and markdown delimiters', () => {
-  assert.throws(() => renderRegistry([{ name: 'bad|name', path: '/tmp/x', kind: 'open' }]), /\|/);
-  assert.throws(() => renderRegistry([{ name: 'work', path: '/tmp/x', kind: 'private' }]), /open 또는 secure/);
+test('registry rejects markdown delimiters and invalid backend', () => {
+  assert.throws(() => renderRegistry([{ name: 'bad|name', path: '/tmp/x' }]), /\|/);
+  assert.throws(() => renderRegistry([{ name: 'work', path: '/tmp/x', backend: 'svn' }]), /local 또는 git/);
 });
 
 test('registry reports broken rows with line numbers instead of throwing', () => {
   const content = [
-    '| name | path | kind | signals | notes |',
-    '|------|------|------|---------|-------|',
-    '| ok | /tmp/ok | open |  |  |',
-    '| broken | /tmp/x | privte |  |  |',
+    '| name | path | backend | origin | signals | notes |',
+    '|------|------|---------|--------|---------|-------|',
+    '| ok | /tmp/ok | local |  |  |  |',
+    '| broken | /tmp/x | svn |  |  |  |',
     '| short | /tmp/x |',
-    '| ok | /tmp/dupe | open |  |  |',
+    '| ok | /tmp/dupe | local |  |  |  |',
   ].join('\n');
 
   const { vaults, issues } = parseRegistryFile(content);
   assert.deepEqual(vaults.map((vault) => vault.name), ['ok']);
   assert.deepEqual(issues.map((issue) => issue.line), [4, 5, 6]);
-  assert.match(issues[0].message, /open 또는 secure/);
-  assert.match(issues[1].message, /7개.*또는.*5개/);
+  assert.match(issues[0].message, /local 또는 git/);
+  assert.match(issues[1].message, /6개.*또는.*4개/);
   assert.match(issues[2].message, /중복/);
 });
 
 test('registry reports rows with an unsupported column count', () => {
-  const content = '| extra | /tmp/extra | open | signal | note | unexpected |';
+  const content = '| extra | /tmp/extra | local | | signal | note | unexpected | more |';
   const { vaults, issues } = parseRegistryFile(content);
   assert.equal(vaults.length, 0);
   assert.equal(issues.length, 1);
-  assert.match(issues[0].message, /7개.*또는.*5개/);
+  assert.match(issues[0].message, /6개.*또는.*4개/);
 });
 
 test('readRegistry is strict for writers and lenient when asked', () => {
   const file = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-')) + '/wikis.local.md';
-  writeRegistry(file, [{ name: 'ok', path: '/tmp/ok', kind: 'open' }]);
-  fs.appendFileSync(file, '| broken | /tmp/x | privte |  |  |\n');
+  writeRegistry(file, [{ name: 'ok', path: '/tmp/ok' }]);
+  fs.appendFileSync(file, '| broken | /tmp/x | svn |  |  |  |\n');
 
   assert.throws(() => readRegistry(file), (error) => error.message.includes(file) && /2개|행/.test(error.message));
   assert.deepEqual(readRegistry(file, { strict: false }).map((vault) => vault.name), ['ok']);
 });
 
 test('registry round-trips agent overrides with add-dir flag', () => {
-  const vaults = [{ name: 'personal', path: '/tmp/v', kind: 'open', backend: 'local', origin: '', signals: '', notes: '' }];
+  const vaults = [{ name: 'personal', path: '/tmp/v', backend: 'local', origin: '', signals: '', notes: '' }];
   const agents = [
     { name: 'claude', command: 'vibe agent', addDir: false },
     { name: 'codex', command: 'dbexec repo run isaac', addDir: true },
@@ -141,9 +171,9 @@ test('parseRegistryFile accepts legacy 2-col agents and yes/no add-dir', () => {
 
 test('parseRegistryFile reports broken and duplicate agent rows with line numbers', () => {
   const content = [
-    '| name | path | kind | signals | notes |',
-    '|------|------|------|---------|-------|',
-    '| ok | /tmp/ok | open |  |  |',
+    '| name | path | signals | notes |',
+    '|------|------|---------|-------|',
+    '| ok | /tmp/ok |  |  |',
     '',
     '| agent | command | add-dir |',
     '|-------|---------|---------|',
@@ -165,9 +195,9 @@ test('parseRegistryFile reports broken and duplicate agent rows with line number
 test('writeRegistry preserves existing agent overrides when saving vaults', () => {
   const file = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-')) + '/wikis.local.md';
   const override = { name: 'codex', command: 'dbexec repo run isaac', addDir: false };
-  writeRegistry(file, [{ name: 'a', path: '/tmp/a', kind: 'open' }], [override]);
+  writeRegistry(file, [{ name: 'a', path: '/tmp/a' }], [override]);
   // 볼트만 다시 저장(agents 생략) — 매핑이 사라지면 안 된다.
-  writeRegistry(file, [{ name: 'a', path: '/tmp/a', kind: 'open' }, { name: 'b', path: '/tmp/b', kind: 'open' }]);
+  writeRegistry(file, [{ name: 'a', path: '/tmp/a' }, { name: 'b', path: '/tmp/b' }]);
   assert.deepEqual(readAgents(file), [override]);
   assert.deepEqual(readRegistry(file).map((v) => v.name), ['a', 'b']);
 });

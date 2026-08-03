@@ -41,11 +41,11 @@ test('upsertRemoteConfig defaults provider and version when starting fresh', () 
 
 test('upsertRemoteConfig merges publish/inbox without clobbering other fields', () => {
   const publishPath = tmpPublishPath();
-  upsertRemoteConfig(publishPath, 'personal', { publish: { databaseId: 'db1', titleProperty: 'Name' }, allowPublish: true });
+  upsertRemoteConfig(publishPath, 'personal', { publish: { databaseId: 'db1', titleProperty: 'Name' }, connection: 'personal' });
   const { config } = upsertRemoteConfig(publishPath, 'personal', { inbox: { databaseId: 'ibx' } });
   assert.equal(config.publish.databaseId, 'db1');
   assert.equal(config.publish.titleProperty, 'Name');
-  assert.equal(config.allowPublish, true);
+  assert.equal(config.connection, 'personal');
   assert.equal(config.inbox.databaseId, 'ibx');
 });
 

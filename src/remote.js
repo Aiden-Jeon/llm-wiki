@@ -14,7 +14,6 @@ import { normalizeVaultKey } from './providers/token.js';
 //         "connection": "personal",
 //         "publish": { "databaseId": "…", "titleProperty": "Name", "syncedSubdirs": ["wiki/entities", …] },
 //         "inbox":   { "databaseId": "…" },
-//         "allowPublish": false,
 //         "tokenEnv": "LLMWIKI_NOTION_TOKEN_PERSONAL"
 //       }
 //     }

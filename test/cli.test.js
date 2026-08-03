@@ -45,8 +45,8 @@ test('parseOptions keeps "=" inside option values', () => {
 
 test('parseOptions rejects unknown options instead of ignoring them', () => {
   assert.throws(
-    () => parseOptions(['--kine', 'secure'], { allowed: ['kind'] }),
-    /\uc54c \uc218 \uc5c6\ub294 \uc635\uc158: --kine/,
+    () => parseOptions(['--bogus', 'x'], { allowed: ['notes'] }),
+    /\uc54c \uc218 \uc5c6\ub294 \uc635\uc158: --bogus/,
   );
 });
 
@@ -105,7 +105,7 @@ test('vault sync skips a local backend vault instead of running git', async () =
   const paths = getPaths({ LLM_WIKI_CONFIG_HOME: path.join(root, 'config'), LLM_WIKI_DATA_HOME: path.join(root, 'data') });
   const vaultPath = path.join(root, 'vault');
   fs.mkdirSync(vaultPath, { recursive: true });
-  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath }]);
 
   const prev = { c: process.env.LLM_WIKI_CONFIG_HOME, d: process.env.LLM_WIKI_DATA_HOME };
   process.env.LLM_WIKI_CONFIG_HOME = path.join(root, 'config');
@@ -155,7 +155,7 @@ test('publish accepts --dry-run so it errors on config, not on the flag', async 
   const paths = getPaths({ LLM_WIKI_CONFIG_HOME: path.join(root, 'config'), LLM_WIKI_DATA_HOME: path.join(root, 'data') });
   const vaultPath = path.join(root, 'vault');
   fs.mkdirSync(vaultPath, { recursive: true });
-  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath }]);
 
   const prevConfig = process.env.LLM_WIKI_CONFIG_HOME;
   const prevData = process.env.LLM_WIKI_DATA_HOME;
@@ -175,7 +175,7 @@ test('publish subcommands route: list on empty store and add requires a token', 
   const paths = getPaths({ LLM_WIKI_CONFIG_HOME: path.join(root, 'config'), LLM_WIKI_DATA_HOME: path.join(root, 'data') });
   const vaultPath = path.join(root, 'vault');
   fs.mkdirSync(vaultPath, { recursive: true });
-  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath }]);
 
   const prevConfig = process.env.LLM_WIKI_CONFIG_HOME;
   const prevData = process.env.LLM_WIKI_DATA_HOME;
@@ -210,47 +210,9 @@ test('vault add no longer accepts remote flags (decoupled from publish add)', as
   }
 });
 
-test('non-TTY secure scaffold requires an explicit vault name', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-secure-scaffold-'));
-  const prevConfig = process.env.LLM_WIKI_CONFIG_HOME;
-  const prevData = process.env.LLM_WIKI_DATA_HOME;
-  process.env.LLM_WIKI_CONFIG_HOME = path.join(root, 'config');
-  process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
-  try {
-    const paths = getPaths(process.env);
-    const vaultPath = path.join(root, 'secure-vault');
-    writeRegistry(paths.registry, [{ name: 'work', path: vaultPath, kind: 'secure' }]);
-    await assert.rejects(() => main(['vault', 'scaffold']), /secure 볼트 scaffold는 볼트 이름을 명시/);
-    assert.equal(fs.existsSync(vaultPath), false);
-  } finally {
-    if (prevConfig === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prevConfig;
-    if (prevData === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prevData;
-  }
-});
-
-test('non-TTY secure inbox pull requires an explicit vault name before creating a client', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-secure-inbox-'));
-  const prevConfig = process.env.LLM_WIKI_CONFIG_HOME;
-  const prevData = process.env.LLM_WIKI_DATA_HOME;
-  process.env.LLM_WIKI_CONFIG_HOME = path.join(root, 'config');
-  process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
-  try {
-    const paths = getPaths(process.env);
-    const vaultPath = path.join(root, 'secure-vault');
-    fs.mkdirSync(vaultPath, { recursive: true });
-    writeRegistry(paths.registry, [{ name: 'work', path: vaultPath, kind: 'secure' }]);
-    upsertRemoteConfig(paths.publish, 'work', { provider: 'notion', inbox: { databaseId: 'db' } });
-    await assert.rejects(() => main(['inbox', 'pull']), /secure 볼트 inbox pull은 볼트 이름을 명시/);
-    assert.equal(fs.existsSync(path.join(vaultPath, 'raw', 'notes')), false);
-  } finally {
-    if (prevConfig === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prevConfig;
-    if (prevData === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prevData;
-  }
-});
-
 test('prepareWorkspace refreshes managed files and keeps local agent state', () => {
   const paths = tmpPaths();
-  writeRegistry(paths.registry, [{ name: 'personal', path: '/tmp/personal', kind: 'open' }]);
+  writeRegistry(paths.registry, [{ name: 'personal', path: '/tmp/personal' }]);
 
   fs.mkdirSync(path.join(paths.workspace, '.claude'), { recursive: true });
   fs.writeFileSync(path.join(paths.workspace, '.claude/settings.local.json'), '{"permissions":{}}');
@@ -270,7 +232,7 @@ test('prepareWorkspace refreshes managed files and keeps local agent state', () 
 
 test('prepareWorkspace publishes user skills as skills, commands and catalog', () => {
   const paths = tmpPaths();
-  writeRegistry(paths.registry, [{ name: 'personal', path: '/tmp/personal', kind: 'open' }]);
+  writeRegistry(paths.registry, [{ name: 'personal', path: '/tmp/personal' }]);
   createSkill(paths.skillsDir, { name: 'weekly-retro', description: '주간 회고를 생성한다.' });
   // 내장 명령은 스킬이 덮어쓰지 못해야 한다.
   fs.mkdirSync(path.join(paths.skillsDir, 'wiki-add'), { recursive: true });
@@ -298,8 +260,8 @@ test('prepareWorkspace symlinks existing vaults into vaults/ and skips missing o
   fs.mkdirSync(realVault, { recursive: true });
   fs.writeFileSync(path.join(realVault, 'index.md'), '# personal');
   writeRegistry(paths.registry, [
-    { name: 'personal', path: realVault, kind: 'open' },
-    { name: 'ghost', path: path.join(root, 'does-not-exist'), kind: 'open' },
+    { name: 'personal', path: realVault },
+    { name: 'ghost', path: path.join(root, 'does-not-exist') },
   ]);
 
   prepareWorkspace(paths);
@@ -333,7 +295,7 @@ function stubProvider(calls) {
 test('configureRemote validates before storing, then writes token to store and db to publish.json', async () => {
   const paths = tmpPaths();
   const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-cr-'));
-  const vault = { name: 'personal', path: vaultPath, kind: 'open' };
+  const vault = { name: 'personal', path: vaultPath };
   const calls = [];
 
   const ok = await configureRemote(paths, vault,
@@ -358,7 +320,7 @@ test('configureRemote validates before storing, then writes token to store and d
 test('configureRemote does not store anything when validation fails', async () => {
   const paths = tmpPaths();
   const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-crfail-'));
-  const vault = { name: 'personal', path: vaultPath, kind: 'open' };
+  const vault = { name: 'personal', path: vaultPath };
   const provider = {
     name: 'notion', tokenPrefix: 'NOTION',
     createClient: async () => ({}),
@@ -376,7 +338,7 @@ test('configureRemote does not store anything when validation fails', async () =
 test('configureRemote (non-TTY) needs a token when no connection is stored', async () => {
   const paths = tmpPaths();
   const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-crtok-'));
-  const vault = { name: 'personal', path: vaultPath, kind: 'open' };
+  const vault = { name: 'personal', path: vaultPath };
   await assert.rejects(
     () => configureRemote(paths, vault, { remote: 'notion', 'publish-db': 'db1' }, { getProvider: () => stubProvider([]) }),
     /--remote-token/,
@@ -386,7 +348,7 @@ test('configureRemote (non-TTY) needs a token when no connection is stored', asy
 test('configureRemote (non-TTY) defaults the connection name to the vault name', async () => {
   const paths = tmpPaths();
   const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-crdef-'));
-  const vault = { name: 'personal', path: vaultPath, kind: 'open' };
+  const vault = { name: 'personal', path: vaultPath };
   await configureRemote(paths, vault,
     { remote: 'notion', 'remote-token': 'secret_x', 'publish-db': 'db1' },
     { getProvider: () => stubProvider([]) });
@@ -400,7 +362,7 @@ test('configureRemote reuses a stored connection by name without a new token', a
   const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-crreuse-'));
   addConnection(paths.secrets, 'notion', 'shared', { token: 'secret_shared', account: 'ACME' });
   const calls = [];
-  const ok = await configureRemote(paths, { name: 'work', path: vaultPath, kind: 'open' },
+  const ok = await configureRemote(paths, { name: 'work', path: vaultPath },
     { remote: 'notion', connection: 'shared', 'publish-db': 'db1' },
     { getProvider: () => stubProvider(calls) });
   assert.equal(ok, true);
@@ -410,24 +372,11 @@ test('configureRemote reuses a stored connection by name without a new token', a
   assert.equal(listConnections(paths.secrets, 'notion').length, 1);
 });
 
-test('configureRemote (non-TTY) drops secure publish without --allow-publish but keeps inbox', async () => {
-  const paths = tmpPaths();
-  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-crsec-'));
-  const vault = { name: 'work', path: vaultPath, kind: 'secure' };
-  const ok = await configureRemote(paths, vault,
-    { remote: 'notion', 'remote-token': 't', 'publish-db': 'db1', 'inbox-db': 'ibx' },
-    { getProvider: () => stubProvider([]) });
-  assert.equal(ok, true);
-  const config = loadRemoteConfig(paths.publish, 'work');
-  assert.equal(config.publish, undefined); // secure + no allow-publish → publish 미설정
-  assert.equal(config.inbox.databaseId, 'ibx');
-});
-
 test('publish remove (non-TTY) keeps the connection token by default', async () => {
   const paths = tmpPaths();
   const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-prkeep-'));
-  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
-  await configureRemote(paths, { name: 'personal', path: vaultPath, kind: 'open' },
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath }]);
+  await configureRemote(paths, { name: 'personal', path: vaultPath },
     { remote: 'notion', connection: 'personal', 'remote-token': 'secret_x', 'publish-db': 'db1' },
     { getProvider: () => stubProvider([]) });
 
@@ -441,8 +390,8 @@ test('publish remove (non-TTY) keeps the connection token by default', async () 
 test('publish remove --purge-token deletes the token once the connection is orphaned', async () => {
   const paths = tmpPaths();
   const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-prpurge-'));
-  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
-  await configureRemote(paths, { name: 'personal', path: vaultPath, kind: 'open' },
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath }]);
+  await configureRemote(paths, { name: 'personal', path: vaultPath },
     { remote: 'notion', connection: 'personal', 'remote-token': 'secret_x', 'publish-db': 'db1' },
     { getProvider: () => stubProvider([]) });
 
@@ -457,14 +406,14 @@ test('publish remove --purge-token keeps a connection still used by another vaul
   const vpA = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-prshareA-'));
   const vpB = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-prshareB-'));
   writeRegistry(paths.registry, [
-    { name: 'alpha', path: vpA, kind: 'open' },
-    { name: 'beta', path: vpB, kind: 'open' },
+    { name: 'alpha', path: vpA },
+    { name: 'beta', path: vpB },
   ]);
   // 두 볼트가 같은 연결 'shared'를 쓴다.
-  await configureRemote(paths, { name: 'alpha', path: vpA, kind: 'open' },
+  await configureRemote(paths, { name: 'alpha', path: vpA },
     { remote: 'notion', connection: 'shared', 'remote-token': 'secret_s', 'publish-db': 'db1' },
     { getProvider: () => stubProvider([]) });
-  await configureRemote(paths, { name: 'beta', path: vpB, kind: 'open' },
+  await configureRemote(paths, { name: 'beta', path: vpB },
     { remote: 'notion', connection: 'shared', 'publish-db': 'db2' },
     { getProvider: () => stubProvider([]) });
 
@@ -480,8 +429,8 @@ test('publish remove --purge-token keeps a connection still used by another vaul
 test('publish remove rejects conflicting --purge-token and --keep-token', async () => {
   const paths = tmpPaths();
   const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-prconf-'));
-  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
-  await configureRemote(paths, { name: 'personal', path: vaultPath, kind: 'open' },
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath }]);
+  await configureRemote(paths, { name: 'personal', path: vaultPath },
     { remote: 'notion', connection: 'personal', 'remote-token': 'secret_x', 'publish-db': 'db1' },
     { getProvider: () => stubProvider([]) });
   await assert.rejects(
@@ -493,8 +442,8 @@ test('publish remove rejects conflicting --purge-token and --keep-token', async 
 test('config export bundle carries no stored tokens', async () => {
   const paths = tmpPaths();
   const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-crexp-'));
-  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
-  await configureRemote(paths, { name: 'personal', path: vaultPath, kind: 'open' },
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath }]);
+  await configureRemote(paths, { name: 'personal', path: vaultPath },
     { remote: 'notion', 'remote-token': 'secret_x', 'publish-db': 'db1' },
     { getProvider: () => stubProvider([]) });
   const bundle = buildExportBundle(paths);
@@ -565,8 +514,8 @@ test('connection remove (non-TTY) needs --force and then deletes the token', asy
 test('connection remove warns (non-TTY) when a vault still references it but still removes with --force', async () => {
   const paths = tmpPaths();
   const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-connuse-'));
-  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
-  await configureRemote(paths, { name: 'personal', path: vaultPath, kind: 'open' },
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath }]);
+  await configureRemote(paths, { name: 'personal', path: vaultPath },
     { remote: 'notion', connection: 'shared', 'remote-token': 'secret_s', 'publish-db': 'db1' },
     { getProvider: () => stubProvider([]) });
   const provider = { name: 'notion', tokenPrefix: 'NOTION' };
@@ -582,7 +531,7 @@ test('reset wipes config but preserves registered vault files by default', async
   const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-resetvault-'));
   const vaultFile = path.join(vaultPath, 'index.md');
   fs.writeFileSync(vaultFile, '# keep me');
-  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath }]);
   addConnection(paths.secrets, 'notion', 'work', { token: 'secret_w' });
   createSkill(paths.skillsDir, { name: 'weekly-retro', description: '주간 회고.' });
   fs.mkdirSync(paths.workspace, { recursive: true });
@@ -619,7 +568,7 @@ test('reset --purge-vaults also deletes the registered vault directory', async (
   const paths = tmpPaths();
   const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-resetpurge-'));
   fs.writeFileSync(path.join(vaultPath, 'index.md'), '# gone');
-  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath }]);
 
   await resetConfig(paths, ['--purge-vaults', '--force']);
   assert.equal(fs.existsSync(vaultPath), false);
@@ -628,7 +577,7 @@ test('reset --purge-vaults also deletes the registered vault directory', async (
 
 test('reset refuses without --force in non-interactive mode', async () => {
   const paths = tmpPaths();
-  writeRegistry(paths.registry, [{ name: 'personal', path: '/tmp/personal', kind: 'open' }]);
+  writeRegistry(paths.registry, [{ name: 'personal', path: '/tmp/personal' }]);
   await assert.rejects(() => resetConfig(paths, []), /--force/);
   // 거부됐으므로 레지스트리는 그대로 있어야 한다.
   assert.equal(fs.existsSync(paths.registry), true);

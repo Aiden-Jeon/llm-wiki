@@ -17,7 +17,6 @@ llmwiki config edit
 llmwiki vault add \
   --name personal \
   --path ~/wikis/personal \
-  --kind open \
   --signals "커리어,AI,논문" \
   --notes "개인 학습 자료"
 
@@ -33,13 +32,12 @@ llmwiki doctor
 |---|---|---|
 | `name` | 필수 | CLI에서 사용하는 고유 식별자 |
 | `path` | local에서 필수 | 볼트의 로컬 경로. 절대 경로로 저장됨 |
-| `kind` | 선택 | `open` 또는 `secure`. 기본값은 `open` |
 | `backend` | 선택 | `local` 또는 `git`. 기본값은 `local` |
 | `origin` | git에서 필수 | Git 원격 저장소 URL |
 | `signals` | 선택 | 자동 라우팅에 사용할 쉼표 구분 주제·키워드 |
 | `notes` | 선택 | 라우팅 시 참고할 용도와 특이사항 |
 
-`open`은 일반 자료용입니다. `secure`는 업무·고객·개인정보 등 민감한 자료에 사용하며, 쓰기 전에 확인과 익명화 절차가 적용됩니다. 이는 암호화나 파일 접근 제어를 대신하지 않습니다.
+레지스트리는 하위호환을 위해 과거 `kind` 열이 포함된 표(7열/5열)도 읽으며, 이 경우 `kind` 값은 무시하고 재저장 시 현재 형식으로 정리합니다.
 
 ## Local과 Git backend
 
@@ -49,8 +47,7 @@ llmwiki doctor
 llmwiki vault add \
   --name work \
   --backend git \
-  --origin git@github.com:me/work-wiki.git \
-  --kind secure
+  --origin git@github.com:me/work-wiki.git
 ```
 
 `path`를 생략하면 `~/llmwiki-vaults/<name>`에 clone합니다.
