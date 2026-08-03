@@ -50,11 +50,11 @@ secure 볼트로 쓰기가 해소되면:
 
 원격 연동(`llmwiki publish`, `llmwiki inbox pull`)의 결정론 규칙:
 
-- **provider로 추상화.** 원격 대상은 `_meta/remote.json`의 `provider` 값으로 결정한다(현재 지원: `notion`). 새 대상은 `src/providers/<name>.js` 구현 + 레지스트리 등록으로 붙고, orchestrator·diff·보안 규칙은 provider-중립으로 공유된다. `_meta/remote.json`과 토큰은 `llmwiki vault add`의 원격 옵션(또는 대화형 위저드)으로 설정하며, 저장 전 provider API(토큰 유효성 + 대상 DB 존재)로 검증한다.
+- **발행 설정은 볼트와 분리 — 전역 config에.** 발행 설정(provider·대상 DB·`allowPublish` 등)은 볼트가 아니라 전역 config의 `publish.json`에 볼트 이름을 키로 둔다. 볼트는 이름으로 자기 엔트리를 참조만 한다. `설정=전역, 상태=볼트`: 발행 상태(`_meta/remote-map.json`, `_meta/remote-inbox.json`)만 볼트에 남겨 git 볼트와 함께 이동하게 하고(여러 머신에서 중복 발행 방지), 어디로·무엇을 발행할지는 볼트 밖에서 관리한다.
+- **provider로 추상화.** 원격 대상은 `publish.json` 엔트리의 `provider` 값으로 결정한다(현재 지원: `notion`). 새 대상은 `src/providers/<name>.js` 구현 + 레지스트리 등록으로 붙고, orchestrator·diff·보안 규칙은 provider-중립으로 공유된다. 발행 설정과 토큰은 `llmwiki publish add <vault>`로 설정하며(`vault add`와 분리), 저장 전 provider API(토큰 유효성 + 대상 DB 존재)로 검증한다.
 - **호출당 정확히 한 볼트.** `publish`/`inbox`는 대상 볼트를 하나로 해소하고 그 볼트의 토큰·대상만 쓴다("publish all" 없음).
-- **토큰은 env 또는 설정 디렉터리 `secrets.json`에만.** 마크다운 레지스트리·git·`_meta/remote.json`에는 저장하지 않는다. `secrets.json`은 config 디렉터리에 `0600`으로 두고 `.gitignore`·`config export` 번들에서 제외한다. 조회 순서: `_meta/remote.json`의 `tokenEnv`(env) → `LLMWIKI_<PROVIDER>_TOKEN_<VAULT>`(env) → `LLMWIKI_<PROVIDER>_TOKEN`(env) → `secrets.json`(`provider:<VAULT>` → `provider:*`). env가 store보다 우선이다.
-- **비밀 아닌 설정만 커밋.** `_meta/remote.json`(provider, 대상 id, 동기화 서브디렉터리)과 상태 파일(`_meta/remote-map.json`, `_meta/remote-inbox.json`)은 git 커밋 대상이다.
-- **`kind: secure` 볼트 publish는 명시적 opt-in.** `_meta/remote.json`에 `"allowPublish": true`가 없으면 거부하고, 첫 push 전 확인·익명화 게이트를 거친다.
+- **토큰은 env 또는 설정 디렉터리 `secrets.json`에만.** 마크다운 레지스트리·git·`publish.json`에는 저장하지 않는다. `secrets.json`은 config 디렉터리에 `0600`으로 두고 `.gitignore`·`config export` 번들에서 제외한다. 조회 순서: `publish.json` 엔트리의 `tokenEnv`(env) → `LLMWIKI_<PROVIDER>_TOKEN_<VAULT>`(env) → `LLMWIKI_<PROVIDER>_TOKEN`(env) → `secrets.json`(`provider:<VAULT>` → `provider:*`). env가 store보다 우선이다.
+- **`kind: secure` 볼트 publish는 명시적 opt-in.** `publish.json` 엔트리에 `"allowPublish": true`가 없으면 거부하고, 첫 push 전 확인·익명화 게이트를 거친다.
 
 ## 명령 카탈로그
 
@@ -111,7 +111,8 @@ secure 볼트로 쓰기가 해소되면:
 
 ## 원격 발행 — 위키 view publish (터미널 명령)
 
-- **`llmwiki publish [vault] [--dry-run] [--limit <n>]`** — 로컬 위키(`wiki/**`)를 원격 대상으로 **단방향(local→원격)** push해 view를 발행한다. diff를 떠 매핑에 없는 페이지는 생성, 콘텐츠 해시가 바뀐 페이지는 갱신하며, 원격→local이나 원격 페이지 삭제는 하지 않는다. 상태는 `_meta/remote-map.json`에 슬러그별 `remoteId`·`hash`로 기록한다. `--dry-run`은 토큰 없이 diff 요약만 낸다. 원격 대상은 `_meta/remote.json`의 `provider`로 결정하며(현재 Notion), 설정·토큰·보안은 `§ 보안 경계`의 원격 연동 규칙을 따른다.
+- **`llmwiki publish [vault] [--dry-run] [--limit <n>]`** — 로컬 위키(`wiki/**`)를 원격 대상으로 **단방향(local→원격)** push해 view를 발행한다. diff를 떠 매핑에 없는 페이지는 생성, 콘텐츠 해시가 바뀐 페이지는 갱신하며, 원격→local이나 원격 페이지 삭제는 하지 않는다. 상태는 `_meta/remote-map.json`에 슬러그별 `remoteId`·`hash`로 기록한다. `--dry-run`은 토큰 없이 diff 요약만 낸다. 발행 설정은 전역 `publish.json` 엔트리로 관리하며(`llmwiki publish add`), 원격 대상은 그 엔트리의 `provider`로 결정한다(현재 Notion). 설정·토큰·보안은 `§ 보안 경계`의 원격 연동 규칙을 따른다.
+- **`llmwiki publish add [vault]` / `list` / `remove`** — 발행 설정을 관리하는 독립 명령군(`vault add`와 분리). `add`는 토큰·대상 DB를 받아 provider API로 검증한 뒤 전역 `publish.json`에 엔트리를, 토큰은 `secrets.json`에 저장한다. `list`는 등록된 설정을, `remove [--purge-token]`은 엔트리(선택적으로 토큰까지)를 지운다.
 
 > `vault sync`(git backend)는 마크다운 원본 파일을 머신 간에 공유하고, `publish`(provider)는 위키 view를 Notion 등에 발행한다. 서로 다른 계층이다.
 

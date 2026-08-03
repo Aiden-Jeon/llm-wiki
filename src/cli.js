@@ -33,11 +33,11 @@ import {
   resolveCaptureVault,
   writeRawNote,
 } from './capture.js';
-import { loadRemoteConfig, upsertRemoteConfig } from './remote.js';
+import { loadRemoteConfig, upsertRemoteConfig, removeRemoteConfig, listRemoteConfigs, DEFAULT_PROVIDER } from './remote.js';
 import { renderNote } from './note.js';
 import { getProvider, listProviders } from './providers/index.js';
 import { resolveRemoteToken } from './providers/token.js';
-import { setSecret } from './secrets.js';
+import { setSecret, deleteSecret } from './secrets.js';
 import { pushSync } from './sync.js';
 import { pullInbox } from './inbox.js';
 import {
@@ -53,13 +53,15 @@ import {
 } from './git.js';
 import { applyImportBundle, readExportBundle, writeExportBundle } from './settings.js';
 
-const VAULT_OPTION_KEYS = ['name', 'path', 'kind', 'backend', 'origin', 'signals', 'notes',
-  'remote', 'remote-token', 'publish-db', 'inbox-db', 'title-prop', 'allow-publish'];
-const VAULT_BOOLEAN_KEYS = ['allow-publish'];
-const VAULT_ADD_USAGE = 'llmwiki vault add --name <name> [--path <path>] [--kind open|secure] [--backend local|git] [--origin <git-url>] [--signals <신호>] [--notes <메모>] [--remote <provider> --remote-token <token> --publish-db <id> --inbox-db <id> --title-prop <name> --allow-publish]';
+const VAULT_OPTION_KEYS = ['name', 'path', 'kind', 'backend', 'origin', 'signals', 'notes'];
+const VAULT_BOOLEAN_KEYS = [];
+const VAULT_ADD_USAGE = 'llmwiki vault add --name <name> [--path <path>] [--kind open|secure] [--backend local|git] [--origin <git-url>] [--signals <신호>] [--notes <메모>]';
 const VAULT_SYNC_USAGE = 'llmwiki vault sync [name] [--message <msg>] [--no-push] [--pull-only]';
 const CAPTURE_USAGE = 'llmwiki capture [--vault <name>] [--title <제목>] [--text <내용>]';
 const PUBLISH_USAGE = 'llmwiki publish [vault] [--dry-run] [--limit <n>]';
+const PUBLISH_ADD_USAGE = 'llmwiki publish add [vault] [--remote <provider>] [--remote-token <token>] [--publish-db <id>] [--inbox-db <id>] [--title-prop <name>] [--allow-publish]';
+const PUBLISH_REMOVE_USAGE = 'llmwiki publish remove [vault] [--purge-token]';
+const PUBLISH_LIST_USAGE = 'llmwiki publish list [--json]';
 const CONFIG_EXPORT_USAGE = 'llmwiki config export [--output <file>]';
 const CONFIG_IMPORT_USAGE = 'llmwiki config import <file> [--vaults-dir <dir>] [--force]';
 const INBOX_USAGE = 'llmwiki inbox pull [vault] [--dry-run] [--limit <n>]';
@@ -76,6 +78,9 @@ const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운영합�
   llmwiki new <url|경로|텍스트>    에이전트를 띄워 입력을 ingest
   llmwiki capture [options]       자유 텍스트 메모를 볼트 raw/notes/에 저장
   llmwiki publish [vault] [--dry-run] [--limit <n>]   로컬 위키를 원격에 발행 (view, 단방향)
+  llmwiki publish add [vault] [options]  볼트에 원격 provider를 연결 (발행 설정)
+  llmwiki publish list [--json]   등록된 발행 설정 목록
+  llmwiki publish remove [vault] [--purge-token]  발행 설정 삭제
   llmwiki inbox pull [vault] [--dry-run] [--limit <n>]  원격 inbox의 새 항목을 가져옴
   llmwiki setup                   초기 설정 및 볼트 등록
   llmwiki vault add [options]     볼트 추가/수정
@@ -105,10 +110,7 @@ vault add 옵션:
   --name <name> [--path <path>] [--kind open|secure]
   [--backend local|git] [--origin <git-url>]
   [--signals <쉼표 구분 신호>] [--notes <메모>]
-  원격 연결(선택):
-  [--remote <provider>] [--remote-token <token>]
-  [--publish-db <id>] [--inbox-db <id>] [--title-prop <name>] [--allow-publish]
-  토큰은 저장 전에 provider API로 검증하고, 설정 디렉터리 secrets.json(0600)에 저장합니다.
+  원격 발행 연결은 볼트와 분리돼 있습니다 → llmwiki publish add <vault> 참고.
 
 볼트 백엔드:
   local  이 머신의 폴더 (기본값)
@@ -148,16 +150,18 @@ capture 옵션:
   --text <내용>    메모 본문 (미지정 시 TTY 프롬프트, 파이프면 stdin)
 
 원격 연동 (publish/inbox):
-  볼트별 설정은 <vault>/_meta/remote.json에 둡니다 (토큰 제외, git 커밋).
-    { "provider": "notion", "publish": { "databaseId": "…" }, "inbox": { "databaseId": "…" }, "allowPublish": false }
-  llmwiki vault add의 원격 옵션(또는 대화형 위저드)으로 이 파일을 생성하고 토큰을 저장합니다.
+  발행 설정은 볼트와 분리돼 전역 config의 publish.json에 볼트 이름으로 둡니다 (토큰 제외).
+    { "version": 1, "vaults": { "personal": { "provider": "notion",
+        "publish": { "databaseId": "…" }, "inbox": { "databaseId": "…" }, "allowPublish": false } } }
+  llmwiki publish add <vault>로 이 엔트리를 생성하고 토큰을 secrets.json(0600)에 저장합니다.
   provider가 원격 대상을 결정합니다(현재 지원: notion). publish는 wiki/** 페이지를
-  단방향 push해 view를 발행하고 상태는 <vault>/_meta/remote-map.json에 기록합니다.
+  단방향 push해 view를 발행하고, 발행 상태는 <vault>/_meta/remote-map.json에 기록합니다
+  (설정=전역, 상태=볼트: 상태는 git 볼트와 함께 이동해 여러 머신에서 중복 발행을 막습니다).
   secure 볼트는 allowPublish: true 필요. Notion provider는 @notionhq/client가 필요합니다:
   npm i @notionhq/client
 
 토큰 저장·해소 순서 (앞이 우선):
-  1. remote.json의 tokenEnv가 가리키는 환경 변수
+  1. publish.json 엔트리의 tokenEnv가 가리키는 환경 변수
   2. LLMWIKI_<PROVIDER>_TOKEN_<VAULT>  (환경 변수)
   3. LLMWIKI_<PROVIDER>_TOKEN          (환경 변수)
   4. 설정 디렉터리 secrets.json         (0600, git·config export 제외)
@@ -427,20 +431,18 @@ async function addVault(paths, args, { outro = true, initial = {}, edit = false 
   else vaults.push(vault);
   writeRegistry(paths.registry, vaults);
 
-  // 볼트 등록 후 원격 provider 연결을 안내한다(중단돼도 볼트 등록은 유지).
-  await configureRemote(paths, vault, options);
-
   const message = `${existing >= 0 ? '볼트 수정 완료' : '볼트 추가 완료'} · ${vault.name} → ${vault.path}`;
   if (stdin.isTTY) {
     if (outro) p.outro(message);
     else p.log.success(message);
   } else console.log(message);
+  // 원격 발행 설정은 볼트와 분리돼 있다: `llmwiki publish add <vault>`로 따로 연결한다.
   return true;
 }
 
 /**
  * 볼트에 원격 provider를 연결한다. 토큰·DB id를 받아 실호출로 검증한 뒤,
- * 성공해야만 토큰을 secrets store에 저장하고 _meta/remote.json을 기록한다.
+ * 성공해야만 토큰을 secrets store에 저장하고 전역 publish.json에 대상 설정을 기록한다.
  * getProvider는 테스트 주입 seam이다. 비-TTY에서는 --remote가 있어야만 동작한다.
  */
 export async function configureRemote(paths, vault, opts = {}, { getProvider: resolveProvider = getProvider } = {}) {
@@ -471,7 +473,7 @@ export async function configureRemote(paths, vault, opts = {}, { getProvider: re
   // 토큰: 플래그 우선, 없으면 TTY에서 password 프롬프트(에코 방지).
   let token = opts['remote-token'];
   if (!token) {
-    if (!tty) throw new Error(`--remote 사용 시 --remote-token이 필요합니다.\n사용법: ${VAULT_ADD_USAGE}`);
+    if (!tty) throw new Error(`--remote 사용 시 --remote-token이 필요합니다.\n사용법: ${PUBLISH_ADD_USAGE}`);
     const entered = await p.password({ message: `${provider.name} 토큰`, mask: '•' });
     if (cancelPrompt(entered)) return false;
     token = entered;
@@ -529,7 +531,7 @@ export async function configureRemote(paths, vault, opts = {}, { getProvider: re
   }
   if (spin) spin.stop('검증 완료');
 
-  // 검증 통과 → 토큰은 store에만, 대상 설정은 remote.json에(토큰 없이) 기록한다.
+  // 검증 통과 → 토큰은 store에만, 대상 설정은 전역 publish.json에(토큰 없이) 기록한다.
   setSecret(paths.secrets, provider.name, vault.name, token);
   const patch = { provider: provider.name };
   if (publishDb) {
@@ -538,11 +540,85 @@ export async function configureRemote(paths, vault, opts = {}, { getProvider: re
     if (vault.kind === 'secure') patch.allowPublish = true;
   }
   if (inboxDb) patch.inbox = { databaseId: inboxDb };
-  upsertRemoteConfig(vault.path, patch);
+  upsertRemoteConfig(paths.publish, vault.name, patch);
 
-  const summary = `원격 연결 · ${vault.name} → ${provider.name}${publishDb ? ' · publish' : ''}${inboxDb ? ' · inbox' : ''} · 토큰 저장됨(secrets.json)`;
+  const summary = `발행 설정 · ${vault.name} → ${provider.name}${publishDb ? ' · publish' : ''}${inboxDb ? ' · inbox' : ''} · 토큰 저장됨(secrets.json)`;
   if (tty) p.log.success(summary); else console.log(summary);
   return true;
+}
+
+/**
+ * `llmwiki publish add [vault]`: 볼트에 원격 provider를 연결하는 독립 명령.
+ * 대상 볼트를 해소한 뒤 configureRemote로 검증·저장을 위임한다.
+ */
+async function publishAdd(paths, args) {
+  const { options, rest } = parseOptions(args, {
+    allowed: ['remote', 'remote-token', 'publish-db', 'inbox-db', 'title-prop', 'allow-publish'],
+    booleans: ['allow-publish'],
+    usage: PUBLISH_ADD_USAGE,
+  });
+  if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${PUBLISH_ADD_USAGE}`);
+  const vault = await resolveRemoteVault(paths, rest[0], PUBLISH_ADD_USAGE);
+  if (!vault) return false;
+  return configureRemote(paths, vault, options);
+}
+
+/**
+ * `llmwiki publish list [--json]`: 전역 publish.json에 등록된 발행 설정을 나열한다.
+ */
+function publishList(paths, args) {
+  const { options, rest } = parseOptions(args, { allowed: ['json'], booleans: ['json'], usage: PUBLISH_LIST_USAGE });
+  if (rest.length) throw new Error(`알 수 없는 인자: ${rest.join(' ')}\n사용법: ${PUBLISH_LIST_USAGE}`);
+  const configs = listRemoteConfigs(paths.publish);
+  if (options.json === true) {
+    console.log(JSON.stringify(configs, null, 2));
+    return true;
+  }
+  const names = Object.keys(configs);
+  if (!names.length) {
+    console.log('등록된 발행 설정이 없습니다. `llmwiki publish add <vault>`로 연결하세요.');
+    return true;
+  }
+  for (const name of names) {
+    const c = configs[name];
+    const parts = [];
+    if (c.publish && c.publish.databaseId) parts.push(`publish=${c.publish.databaseId}`);
+    if (c.inbox && c.inbox.databaseId) parts.push(`inbox=${c.inbox.databaseId}`);
+    if (c.allowPublish) parts.push('allowPublish');
+    console.log(`${name} · ${c.provider || DEFAULT_PROVIDER}${parts.length ? ` · ${parts.join(' · ')}` : ''}`);
+  }
+  return true;
+}
+
+/**
+ * `llmwiki publish remove [vault] [--purge-token]`: 발행 설정 엔트리를 지운다.
+ * --purge-token(또는 TTY 확인)이면 저장된 provider 토큰도 함께 삭제한다.
+ */
+async function publishRemove(paths, args) {
+  const { options, rest } = parseOptions(args, { allowed: ['purge-token'], booleans: ['purge-token'], usage: PUBLISH_REMOVE_USAGE });
+  if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${PUBLISH_REMOVE_USAGE}`);
+  const tty = Boolean(stdin.isTTY);
+  const vault = await resolveRemoteVault(paths, rest[0], PUBLISH_REMOVE_USAGE);
+  if (!vault) return false;
+  const config = loadRemoteConfig(paths.publish, vault.name);
+  if (!config) {
+    const note = `${vault.name} 볼트에 발행 설정이 없습니다.`;
+    if (tty) p.log.warn(note); else console.error(note);
+    return false;
+  }
+
+  const removed = removeRemoteConfig(paths.publish, vault.name);
+
+  let purgeToken = options['purge-token'] === true;
+  if (!purgeToken && tty) {
+    const ok = await p.confirm({ message: `저장된 ${config.provider || DEFAULT_PROVIDER} 토큰도 삭제할까요?`, initialValue: false });
+    purgeToken = !cancelPrompt(ok) && ok === true;
+  }
+  if (purgeToken) deleteSecret(paths.secrets, config.provider || DEFAULT_PROVIDER, vault.name);
+
+  const summary = `발행 설정 삭제 · ${vault.name}${purgeToken ? ' · 토큰 삭제됨' : ''}`;
+  if (tty) p.log.success(summary); else console.log(summary);
+  return removed;
 }
 
 async function setup(paths, args) {
@@ -1384,27 +1460,33 @@ async function capture(paths, args) {
 }
 
 /**
- * 원격 명령(sync/inbox)이 대상 볼트를 해소한다. positional 이름 우선, 없으면 단일 볼트.
- * 여러 볼트인데 이름이 없으면 에러(원격 쓰기는 정확히 한 볼트로 해소한다).
+ * 원격 명령(publish/inbox)이 대상 볼트를 해소한다. positional 이름 우선, 없으면 단일 볼트.
+ * 여러 볼트인데 이름이 없으면 TTY에서는 목록에서 선택하게 하고, 비-TTY에서는 에러를 낸다
+ * (원격 쓰기는 정확히 한 볼트로 해소한다).
  */
-function resolveRemoteVault(paths, requestedName, usage) {
+async function resolveRemoteVault(paths, requestedName, usage) {
   ensureRegistry(paths);
   const vaults = readRegistry(paths.registry);
   if (!vaults.length) throw new Error('등록된 볼트가 없습니다. 먼저 `llmwiki vault add`로 볼트를 등록하세요.');
-  const { vault, ambiguous } = resolveCaptureVault(vaults, requestedName);
-  if (ambiguous) throw new Error(`대상 볼트를 지정하세요.\n사용법: ${usage}`);
+  let { vault, ambiguous } = resolveCaptureVault(vaults, requestedName);
+  if (ambiguous) {
+    if (!stdin.isTTY) throw new Error(`대상 볼트를 지정하세요.\n사용법: ${usage}`);
+    vault = await chooseVault(vaults, '대상 볼트를 선택하세요.');
+    if (!vault) return null;
+  }
   if (!fs.existsSync(vault.path)) throw new Error(`볼트 경로를 찾을 수 없습니다: ${vault.path}`);
   return vault;
 }
 
 /**
- * 원격 설정을 읽고 provider를 해소한다. provider는 _meta/remote.json의 provider 값에서 추론한다.
+ * 원격 설정을 읽고 provider를 해소한다. 설정은 전역 publish.json에서 볼트 이름으로 읽고,
+ * provider는 그 엔트리의 provider 값에서 추론한다.
  * kind는 'publish' | 'inbox' — 없으면 해당 기능이 설정되지 않은 것.
  */
-function resolveRemote(vault, kind) {
-  const config = loadRemoteConfig(vault.path);
+function resolveRemote(paths, vault, kind) {
+  const config = loadRemoteConfig(paths.publish, vault.name);
   if (!config || !config[kind] || !config[kind].databaseId) {
-    throw new Error(`${vault.name} 볼트에 원격 ${kind} 설정이 없습니다. _meta/remote.json의 provider와 ${kind}.databaseId를 설정하세요.`);
+    throw new Error(`${vault.name} 볼트에 원격 ${kind} 설정이 없습니다. \`llmwiki publish add ${vault.name}\`으로 연결하세요.`);
   }
   return { config, provider: getProvider(config.provider) };
 }
@@ -1424,13 +1506,14 @@ async function publish(paths, args) {
   });
   if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${PUBLISH_USAGE}`);
 
-  const vault = resolveRemoteVault(paths, rest[0], PUBLISH_USAGE);
-  const { config, provider } = resolveRemote(vault, 'publish');
+  const vault = await resolveRemoteVault(paths, rest[0], PUBLISH_USAGE);
+  if (!vault) return false;
+  const { config, provider } = resolveRemote(paths, vault, 'publish');
 
   // secure 볼트는 명시적 allowPublish 없이는 거부하고, TTY에서 확인·익명화 게이트를 거친다.
   if (vault.kind === 'secure') {
     if (!config.allowPublish) {
-      throw new Error(`${vault.name}은 secure 볼트입니다. _meta/remote.json에 "allowPublish": true를 설정해야 발행할 수 있습니다.`);
+      throw new Error(`${vault.name}은 secure 볼트입니다. \`llmwiki publish add ${vault.name} --allow-publish\`로 발행을 활성화해야 합니다.`);
     }
     if (stdin.isTTY) {
       p.log.warn(`secure 볼트를 ${provider.name}에 발행합니다. 고객명·자격증명·내부 URL이 익명화됐는지 확인하세요.`);
@@ -1472,8 +1555,9 @@ async function inboxPull(paths, args) {
   });
   if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${INBOX_USAGE}`);
 
-  const vault = resolveRemoteVault(paths, rest[0], INBOX_USAGE);
-  const { config, provider } = resolveRemote(vault, 'inbox');
+  const vault = await resolveRemoteVault(paths, rest[0], INBOX_USAGE);
+  if (!vault) return false;
+  const { config, provider } = resolveRemote(paths, vault, 'inbox');
 
   const dryRun = options['dry-run'] === true;
   const limit = parseLimit(options);
@@ -1594,6 +1678,17 @@ export async function main(args) {
     return capture(paths, rest);
   }
   if (command === 'publish') {
+    const [action, ...pubArgs] = rest;
+    // add/list/remove는 예약 서브명령. 그 외 첫 토큰은 볼트 이름으로 보고 발행 실행에 위임한다.
+    if (action === 'add') {
+      if (stdin.isTTY) p.intro('llmwiki · 발행 설정');
+      return publishAdd(paths, pubArgs);
+    }
+    if (action === 'list') return publishList(paths, pubArgs);
+    if (action === 'remove') {
+      if (stdin.isTTY) p.intro('llmwiki · 발행 설정 삭제');
+      return publishRemove(paths, pubArgs);
+    }
     if (stdin.isTTY) p.intro('llmwiki · 원격 발행');
     return publish(paths, rest);
   }

@@ -12,6 +12,10 @@ function tmpVault() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-provider-'));
 }
 
+function tmpPublishPath() {
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-provider-')), 'publish.json');
+}
+
 test('getProvider returns a registered provider and rejects unknown names', () => {
   const notion = getProvider('notion');
   assert.equal(notion.name, 'notion');
@@ -55,20 +59,18 @@ test('resolveRemoteToken lets env win over the secrets store', () => {
 });
 
 test('loadRemoteConfig returns null when absent and defaults provider to notion', () => {
-  const vault = tmpVault();
-  assert.equal(loadRemoteConfig(vault), null);
-  fs.mkdirSync(path.join(vault, '_meta'), { recursive: true });
-  fs.writeFileSync(path.join(vault, '_meta', 'remote.json'), '{"publish":{"databaseId":"db"}}');
-  const config = loadRemoteConfig(vault);
+  const publishPath = tmpPublishPath();
+  assert.equal(loadRemoteConfig(publishPath, 'personal'), null);
+  fs.writeFileSync(publishPath, '{"version":1,"vaults":{"personal":{"publish":{"databaseId":"db"}}}}');
+  const config = loadRemoteConfig(publishPath, 'personal');
   assert.equal(config.provider, 'notion');
   assert.equal(config.publish.databaseId, 'db');
 });
 
 test('loadRemoteConfig keeps an explicit provider and raises on invalid JSON', () => {
-  const vault = tmpVault();
-  fs.mkdirSync(path.join(vault, '_meta'), { recursive: true });
-  fs.writeFileSync(path.join(vault, '_meta', 'remote.json'), '{"provider":"confluence"}');
-  assert.equal(loadRemoteConfig(vault).provider, 'confluence');
-  fs.writeFileSync(path.join(vault, '_meta', 'remote.json'), '{bad');
-  assert.throws(() => loadRemoteConfig(vault), /파싱 실패/);
+  const publishPath = tmpPublishPath();
+  fs.writeFileSync(publishPath, '{"version":1,"vaults":{"personal":{"provider":"confluence"}}}');
+  assert.equal(loadRemoteConfig(publishPath, 'personal').provider, 'confluence');
+  fs.writeFileSync(publishPath, '{bad');
+  assert.throws(() => loadRemoteConfig(publishPath, 'personal'), /파싱 실패/);
 });

@@ -159,6 +159,46 @@ test('publish accepts --dry-run so it errors on config, not on the flag', async 
   }
 });
 
+test('publish subcommands route: list on empty store and add requires a token', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-pubsub-'));
+  const paths = getPaths({ LLM_WIKI_CONFIG_HOME: path.join(root, 'config'), LLM_WIKI_DATA_HOME: path.join(root, 'data') });
+  const vaultPath = path.join(root, 'vault');
+  fs.mkdirSync(vaultPath, { recursive: true });
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
+
+  const prevConfig = process.env.LLM_WIKI_CONFIG_HOME;
+  const prevData = process.env.LLM_WIKI_DATA_HOME;
+  process.env.LLM_WIKI_CONFIG_HOME = path.join(root, 'config');
+  process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
+  try {
+    // list는 빈 store에서도 성공한다(설정 없음 안내).
+    assert.equal(await main(['publish', 'list']), true);
+    // add는 add 서브명령으로 라우팅돼 토큰 부재까지 도달한다(볼트 이름으로 오인 안 함).
+    await assert.rejects(() => main(['publish', 'add', 'personal', '--remote', 'notion', '--publish-db', 'db1']), /--remote-token이 필요/);
+  } finally {
+    if (prevConfig === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prevConfig;
+    if (prevData === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prevData;
+  }
+});
+
+test('vault add no longer accepts remote flags (decoupled from publish add)', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-vadd-'));
+  const prevConfig = process.env.LLM_WIKI_CONFIG_HOME;
+  const prevData = process.env.LLM_WIKI_DATA_HOME;
+  process.env.LLM_WIKI_CONFIG_HOME = path.join(root, 'config');
+  process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
+  try {
+    // 원격 옵션이 vault add에서 제거됐으므로 알 수 없는 옵션으로 실패해야 한다.
+    await assert.rejects(
+      () => main(['vault', 'add', '--name', 'x', '--path', path.join(root, 'v'), '--remote', 'notion']),
+      /알 수 없는 옵션: --remote/,
+    );
+  } finally {
+    if (prevConfig === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prevConfig;
+    if (prevData === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prevData;
+  }
+});
+
 test('prepareWorkspace refreshes managed files and keeps local agent state', () => {
   const paths = tmpPaths();
   writeRegistry(paths.registry, [{ name: 'personal', path: '/tmp/personal', kind: 'open' }]);
@@ -241,7 +281,7 @@ function stubProvider(calls) {
   };
 }
 
-test('configureRemote validates before storing, then writes token to store and db to remote.json', async () => {
+test('configureRemote validates before storing, then writes token to store and db to publish.json', async () => {
   const paths = tmpPaths();
   const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-cr-'));
   const vault = { name: 'personal', path: vaultPath, kind: 'open' };
@@ -255,12 +295,14 @@ test('configureRemote validates before storing, then writes token to store and d
   // 검증(validate/verify)이 어떤 저장보다 먼저 실행됐다.
   assert.deepEqual(calls, ['create:secret_x', 'validate', 'verify:db1', 'verify:ibx']);
   assert.equal(getSecret(paths.secrets, 'notion', 'personal'), 'secret_x');
-  const config = loadRemoteConfig(vaultPath);
+  const config = loadRemoteConfig(paths.publish, 'personal');
   assert.equal(config.provider, 'notion');
   assert.equal(config.publish.databaseId, 'db1');
   assert.equal(config.inbox.databaseId, 'ibx');
-  // remote.json에는 토큰이 절대 담기지 않는다.
-  assert.doesNotMatch(fs.readFileSync(path.join(vaultPath, '_meta', 'remote.json'), 'utf8'), /secret_x|token/i);
+  // 설정은 볼트 밖 전역 publish.json에 저장되고, 볼트 _meta/에는 아무것도 쓰지 않는다.
+  assert.equal(fs.existsSync(path.join(vaultPath, '_meta', 'remote.json')), false);
+  // publish.json에는 토큰이 절대 담기지 않는다.
+  assert.doesNotMatch(fs.readFileSync(paths.publish, 'utf8'), /secret_x|token/i);
 });
 
 test('configureRemote does not store anything when validation fails', async () => {
@@ -278,7 +320,7 @@ test('configureRemote does not store anything when validation fails', async () =
     /토큰 검증 실패/,
   );
   assert.equal(getSecret(paths.secrets, 'notion', 'personal'), undefined);
-  assert.equal(loadRemoteConfig(vaultPath), null);
+  assert.equal(loadRemoteConfig(paths.publish, 'personal'), null);
 });
 
 test('configureRemote (non-TTY) requires --remote-token when --remote is given', async () => {
@@ -299,7 +341,7 @@ test('configureRemote (non-TTY) drops secure publish without --allow-publish but
     { remote: 'notion', 'remote-token': 't', 'publish-db': 'db1', 'inbox-db': 'ibx' },
     { getProvider: () => stubProvider([]) });
   assert.equal(ok, true);
-  const config = loadRemoteConfig(vaultPath);
+  const config = loadRemoteConfig(paths.publish, 'work');
   assert.equal(config.publish, undefined); // secure + no allow-publish → publish 미설정
   assert.equal(config.inbox.databaseId, 'ibx');
 });

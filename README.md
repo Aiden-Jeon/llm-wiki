@@ -197,6 +197,7 @@ CLI는 관리형 워크스페이스를 준비한 뒤 에이전트를 실행하�
 | `llmwiki new <입력>` | 에이전트를 띄워 URL/파일/텍스트를 ingest |
 | `llmwiki capture [options]` | 자유 텍스트 메모를 볼트 `raw/notes/`에 저장 |
 | `llmwiki publish [vault] [--dry-run]` | 로컬 위키를 원격(provider)으로 단방향 발행 (view) |
+| `llmwiki publish add/list/remove` | 발행 설정을 관리 (볼트와 분리, 전역 `publish.json`) |
 | `llmwiki inbox pull [vault] [--dry-run]` | 원격(provider) inbox의 새 항목을 가져옴 |
 
 ### 에이전트 내부 명령 (라우터 세션 안에서 실행)
@@ -278,31 +279,41 @@ llmwiki inbox pull personal --dry-run           # Notion inbox 새 항목 미리
 
 로컬에서 작업한 위키를 원격 저장소에 **단방향(local→원격)** 으로 발행하고(`publish`), 원격 inbox에서 새 정보를 가져옵니다(`inbox pull`). 원격 대상은 **provider**로 추상화되어 있으며, 현재 Notion을 지원합니다.
 
-원격 연결은 `vault add`에서 설정합니다. 토큰과 대상 DB를 넘기면 저장 전에 provider API로 검증(토큰 유효성 + 대상 DB 존재)한 뒤, 토큰은 설정 디렉터리 `secrets.json`(`0600`)에, 대상 설정은 `_meta/remote.json`에 기록합니다.
+발행 설정은 볼트와 분리돼 있어 `publish add`로 따로 연결합니다(볼트 추가와 독립). 토큰과 대상 DB를 넘기면 저장 전에 provider API로 검증(토큰 유효성 + 대상 DB 존재)한 뒤, 토큰은 설정 디렉터리 `secrets.json`(`0600`)에, 대상 설정은 전역 `publish.json`에 기록합니다.
 
 ```bash
-# 플래그로 한 번에 (검증 후 토큰 저장 · remote.json 기록)
-llmwiki vault add --name personal --path ~/wikis/personal \
-  --remote notion --remote-token secret_xxx --publish-db <db-id> --inbox-db <inbox-db-id>
-# 또는 인자 없이 `llmwiki vault add`로 대화형 위저드 진행 (토큰은 가려서 입력)
+# 볼트는 발행과 무관하게 먼저 등록
+llmwiki vault add --name personal --path ~/wikis/personal
 
+# 발행 설정은 따로 연결 (검증 후 토큰 저장 · publish.json 기록)
+llmwiki publish add personal \
+  --remote notion --remote-token secret_xxx --publish-db <db-id> --inbox-db <inbox-db-id>
+# 또는 `llmwiki publish add personal`로 대화형 진행 (토큰은 가려서 입력)
+
+llmwiki publish list                 # 등록된 발행 설정 확인
 llmwiki publish personal --dry-run   # diff 미리보기 (토큰 없이도 가능)
 llmwiki publish personal             # 없는/바뀐 페이지만 push (저장된 토큰 사용, 재입력 불필요)
+llmwiki publish remove personal      # 발행 설정 삭제 (--purge-token으로 토큰까지)
 ```
 
-- 볼트별 설정은 `<vault>/_meta/remote.json`에 둡니다(토큰 제외, git 커밋). `provider`가 원격 대상을 결정합니다:
+- 발행 설정은 전역 config의 `publish.json`에 볼트 이름을 키로 둡니다(토큰 제외). `provider`가 원격 대상을 결정합니다:
   ```json
   {
     "version": 1,
-    "provider": "notion",
-    "publish": { "databaseId": "…", "syncedSubdirs": ["wiki/entities", "wiki/concepts", "wiki/sources", "wiki/analyses"] },
-    "inbox": { "databaseId": "…" },
-    "allowPublish": false
+    "vaults": {
+      "personal": {
+        "provider": "notion",
+        "publish": { "databaseId": "…", "syncedSubdirs": ["wiki/entities", "wiki/concepts", "wiki/sources", "wiki/analyses"] },
+        "inbox": { "databaseId": "…" },
+        "allowPublish": false
+      }
+    }
   }
   ```
-- **토큰은 env 또는 설정 디렉터리 `secrets.json`에만** 둡니다(레지스트리·git·`remote.json` 저장 금지). `secrets.json`은 `0600`이며 `.gitignore`·`config export`에서 제외됩니다. 조회 순서: `remote.json`의 `tokenEnv`(env) → `LLMWIKI_<PROVIDER>_TOKEN_<VAULT>`(env) → `LLMWIKI_<PROVIDER>_TOKEN`(env) → `secrets.json`. env가 store보다 우선이라 CI·스크립트에서 저장 토큰을 덮어쓸 수 있습니다.
+- **설정=전역, 상태=볼트.** 어디로·무엇을 발행할지는 볼트 밖 `publish.json`에서 관리하고, 발행 상태(`_meta/remote-map.json`)만 볼트에 남겨 git 볼트와 함께 이동하게 합니다(여러 머신에서 중복 발행 방지).
+- **토큰은 env 또는 설정 디렉터리 `secrets.json`에만** 둡니다(레지스트리·git·`publish.json` 저장 금지). `secrets.json`은 `0600`이며 `.gitignore`·`config export`에서 제외됩니다. 조회 순서: `publish.json` 엔트리의 `tokenEnv`(env) → `LLMWIKI_<PROVIDER>_TOKEN_<VAULT>`(env) → `LLMWIKI_<PROVIDER>_TOKEN`(env) → `secrets.json`. env가 store보다 우선이라 CI·스크립트에서 저장 토큰을 덮어쓸 수 있습니다.
 - 발행 상태는 `_meta/remote-map.json`에 슬러그별 `remoteId`·콘텐츠 해시로 기록합니다. 해시가 바뀐 페이지만 갱신하고, 원격→local 역방향이나 원격 페이지 삭제는 하지 않습니다.
-- `kind: secure` 볼트는 `remote.json`에 `"allowPublish": true`가 있어야 하고, push 전 확인·익명화 게이트를 거칩니다.
+- `kind: secure` 볼트는 `publish.json` 엔트리에 `"allowPublish": true`가 있어야 하고(`publish add --allow-publish`), push 전 확인·익명화 게이트를 거칩니다.
 - Notion provider는 `@notionhq/client`가 필요합니다(선택 의존성): `npm i @notionhq/client`.
 
 #### Notion 데이터베이스 속성과 뷰
@@ -328,7 +339,7 @@ llmwiki publish personal             # 없는/바뀐 페이지만 push (저장�
 
 ### 새 provider 추가
 
-원격 대상을 늘리려면 `src/providers/<name>.js`에 provider 인터페이스(`createClient`, 출력용 `createRemotePage`/`updateRemotePage`, 입력용 `listInboxItems`/`itemId`/`fetchInboxNote`)를 구현하고 `src/providers/index.js` 레지스트리에 한 줄 등록합니다. `sync`/`inbox` 오케스트레이터와 diff·상태 로직은 provider-중립이라 그대로 재사용됩니다. 볼트는 `remote.json`의 `provider` 값만 바꾸면 됩니다.
+원격 대상을 늘리려면 `src/providers/<name>.js`에 provider 인터페이스(`createClient`, 출력용 `createRemotePage`/`updateRemotePage`, 입력용 `listInboxItems`/`itemId`/`fetchInboxNote`)를 구현하고 `src/providers/index.js` 레지스트리에 한 줄 등록합니다. `sync`/`inbox` 오케스트레이터와 diff·상태 로직은 provider-중립이라 그대로 재사용됩니다. 볼트는 `publish.json` 엔트리의 `provider` 값만 바꾸면 됩니다.
 
 ## 설계 원칙
 

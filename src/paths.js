@@ -24,6 +24,8 @@ export function getPaths(env = process.env, platform = process.platform) {
     registry: path.join(configBase, 'wikis.local.md'),
     // 원격 provider 토큰 저장소. config 디렉터리에 두어(0600·gitignore) 세션마다 재입력을 없앤다.
     secrets: path.join(configBase, 'secrets.json'),
+    // 발행(publish/inbox) 설정 저장소. 볼트와 분리해 전역 config에 두고, 볼트는 이름으로 참조만 한다.
+    publish: path.join(configBase, 'publish.json'),
     skillsDir: path.join(configBase, 'skills'),
     templatesDir: path.join(packageRoot, 'templates', 'skills'),
     vaultTemplateDir: path.join(packageRoot, 'templates', 'vault'),
