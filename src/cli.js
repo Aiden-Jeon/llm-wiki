@@ -55,7 +55,7 @@ const VAULT_OPTION_KEYS = ['name', 'path', 'kind', 'backend', 'origin', 'signals
 const VAULT_ADD_USAGE = 'llmwiki vault add --name <name> [--path <path>] [--kind open|secure] [--backend local|git] [--origin <git-url>] [--signals <신호>] [--notes <메모>]';
 const VAULT_SYNC_USAGE = 'llmwiki vault sync [name] [--message <msg>] [--no-push] [--pull-only]';
 const CAPTURE_USAGE = 'llmwiki capture [--vault <name>] [--title <제목>] [--text <내용>]';
-const SYNC_USAGE = 'llmwiki sync [vault] [--dry-run] [--limit <n>]';
+const PUBLISH_USAGE = 'llmwiki publish [vault] [--dry-run] [--limit <n>]';
 const CONFIG_EXPORT_USAGE = 'llmwiki config export [--output <file>]';
 const CONFIG_IMPORT_USAGE = 'llmwiki config import <file> [--vaults-dir <dir>] [--force]';
 const INBOX_USAGE = 'llmwiki inbox pull [vault] [--dry-run] [--limit <n>]';
@@ -71,8 +71,8 @@ const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운영합�
   llmwiki codex [agent args]      Codex로 바로 시작
   llmwiki new <url|경로|텍스트>    에이전트를 띄워 입력을 ingest
   llmwiki capture [options]       자유 텍스트 메모를 볼트 raw/notes/에 저장
-  llmwiki sync [vault] [--dry-run] [--limit <n>]   로컬 위키를 Notion으로 push (단방향)
-  llmwiki inbox pull [vault] [--dry-run] [--limit <n>]  Notion inbox의 새 항목을 가져옴
+  llmwiki publish [vault] [--dry-run] [--limit <n>]   로컬 위키를 원격에 발행 (view, 단방향)
+  llmwiki inbox pull [vault] [--dry-run] [--limit <n>]  원격 inbox의 새 항목을 가져옴
   llmwiki setup                   초기 설정 및 볼트 등록
   llmwiki vault add [options]     볼트 추가/수정
   llmwiki vault list [--json]     등록된 볼트 목록
@@ -139,12 +139,12 @@ capture 옵션:
   --title <제목>   메모 제목 (파일명 slug·frontmatter에 사용)
   --text <내용>    메모 본문 (미지정 시 TTY 프롬프트, 파이프면 stdin)
 
-원격 연동 (sync/inbox):
+원격 연동 (publish/inbox):
   볼트별 설정은 <vault>/_meta/remote.json에 둡니다 (토큰 제외, git 커밋).
-    { "provider": "notion", "sync": { "databaseId": "…" }, "inbox": { "databaseId": "…" }, "allowSync": false }
-  provider가 원격 대상을 결정합니다(현재 지원: notion). sync는 wiki/** 페이지를
-  단방향 push하고 상태는 <vault>/_meta/remote-map.json에 기록합니다.
-  secure 볼트는 allowSync: true 필요. Notion provider는 @notionhq/client가 필요합니다:
+    { "provider": "notion", "publish": { "databaseId": "…" }, "inbox": { "databaseId": "…" }, "allowPublish": false }
+  provider가 원격 대상을 결정합니다(현재 지원: notion). publish는 wiki/** 페이지를
+  단방향 push해 view를 발행하고 상태는 <vault>/_meta/remote-map.json에 기록합니다.
+  secure 볼트는 allowPublish: true 필요. Notion provider는 @notionhq/client가 필요합니다:
   npm i @notionhq/client
 
 환경 변수:
@@ -1270,7 +1270,7 @@ function resolveRemoteVault(paths, requestedName, usage) {
 
 /**
  * 원격 설정을 읽고 provider를 해소한다. provider는 _meta/remote.json의 provider 값에서 추론한다.
- * kind는 'sync' | 'inbox' — 없으면 해당 기능이 설정되지 않은 것.
+ * kind는 'publish' | 'inbox' — 없으면 해당 기능이 설정되지 않은 것.
  */
 function resolveRemote(vault, kind) {
   const config = loadRemoteConfig(vault.path);
@@ -1286,26 +1286,26 @@ function parseLimit(options) {
   return limit;
 }
 
-// `llmwiki sync [vault]`: 로컬 위키를 원격(provider)으로 단방향 push한다.
-async function sync(paths, args) {
+// `llmwiki publish [vault]`: 로컬 위키를 원격(provider)으로 단방향 push해 view를 발행한다.
+async function publish(paths, args) {
   const { options, rest } = parseOptions(args, {
     allowed: ['limit', 'dry-run'],
     booleans: ['dry-run'],
-    usage: SYNC_USAGE,
+    usage: PUBLISH_USAGE,
   });
-  if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${SYNC_USAGE}`);
+  if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${PUBLISH_USAGE}`);
 
-  const vault = resolveRemoteVault(paths, rest[0], SYNC_USAGE);
-  const { config, provider } = resolveRemote(vault, 'sync');
+  const vault = resolveRemoteVault(paths, rest[0], PUBLISH_USAGE);
+  const { config, provider } = resolveRemote(vault, 'publish');
 
-  // secure 볼트는 명시적 allowSync 없이는 거부하고, TTY에서 확인·익명화 게이트를 거친다.
+  // secure 볼트는 명시적 allowPublish 없이는 거부하고, TTY에서 확인·익명화 게이트를 거친다.
   if (vault.kind === 'secure') {
-    if (!config.allowSync) {
-      throw new Error(`${vault.name}은 secure 볼트입니다. _meta/remote.json에 "allowSync": true를 설정해야 sync할 수 있습니다.`);
+    if (!config.allowPublish) {
+      throw new Error(`${vault.name}은 secure 볼트입니다. _meta/remote.json에 "allowPublish": true를 설정해야 발행할 수 있습니다.`);
     }
     if (stdin.isTTY) {
-      p.log.warn(`secure 볼트를 ${provider.name}에 push합니다. 고객명·자격증명·내부 URL이 익명화됐는지 확인하세요.`);
-      const accepted = await p.confirm({ message: `${vault.name}(secure)을 ${provider.name}으로 push할까요?`, initialValue: false });
+      p.log.warn(`secure 볼트를 ${provider.name}에 발행합니다. 고객명·자격증명·내부 URL이 익명화됐는지 확인하세요.`);
+      const accepted = await p.confirm({ message: `${vault.name}(secure)을 ${provider.name}으로 발행할까요?`, initialValue: false });
       if (cancelPrompt(accepted) || !accepted) return false;
     }
   }
@@ -1320,15 +1320,15 @@ async function sync(paths, args) {
   const summary = await pushSync(vault.path, {
     provider,
     client,
-    ctx: { databaseId: config.sync.databaseId, titleProp: config.sync.titleProperty },
-    subdirs: config.sync.syncedSubdirs || provider.defaultSyncSubdirs,
+    ctx: { databaseId: config.publish.databaseId, titleProp: config.publish.titleProperty },
+    subdirs: config.publish.syncedSubdirs || provider.defaultSyncSubdirs,
     dryRun,
     limit,
   });
 
   const message = dryRun
     ? `[dry-run] ${vault.name} → ${provider.name} · 생성 예정 ${summary.planned.create} · 갱신 예정 ${summary.planned.update} · 변경 없음 ${summary.unchanged}`
-    : `sync 완료 · ${vault.name} → ${provider.name} · 생성 ${summary.created} · 갱신 ${summary.updated} · 변경 없음 ${summary.unchanged}`;
+    : `publish 완료 · ${vault.name} → ${provider.name} · 생성 ${summary.created} · 갱신 ${summary.updated} · 변경 없음 ${summary.unchanged}`;
   if (stdin.isTTY) p.log.success(message);
   else console.log(message);
   return true;
@@ -1464,9 +1464,9 @@ export async function main(args) {
     if (stdin.isTTY) p.intro('llmwiki · 메모 캡처');
     return capture(paths, rest);
   }
-  if (command === 'sync') {
-    if (stdin.isTTY) p.intro('llmwiki · Notion sync');
-    return sync(paths, rest);
+  if (command === 'publish') {
+    if (stdin.isTTY) p.intro('llmwiki · 원격 발행');
+    return publish(paths, rest);
   }
   if (command === 'inbox') {
     const [action, ...inboxArgs] = rest;

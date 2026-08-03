@@ -39,10 +39,10 @@ test('loadRemoteConfig returns null when absent and defaults provider to notion'
   const vault = tmpVault();
   assert.equal(loadRemoteConfig(vault), null);
   fs.mkdirSync(path.join(vault, '_meta'), { recursive: true });
-  fs.writeFileSync(path.join(vault, '_meta', 'remote.json'), '{"sync":{"databaseId":"db"}}');
+  fs.writeFileSync(path.join(vault, '_meta', 'remote.json'), '{"publish":{"databaseId":"db"}}');
   const config = loadRemoteConfig(vault);
   assert.equal(config.provider, 'notion');
-  assert.equal(config.sync.databaseId, 'db');
+  assert.equal(config.publish.databaseId, 'db');
 });
 
 test('loadRemoteConfig keeps an explicit provider and raises on invalid JSON', () => {

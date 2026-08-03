@@ -6,16 +6,16 @@
 
 핵심 목적은 **로컬에서 지식을 작업하고, 여러 머신에서 이어서 작업하며, 그 결과를 Notion 같은 원격 저장소에서 보여주는 것**입니다. 로컬 위키(볼트)를 중심으로 입력·공유·발행이 갈라집니다.
 
-![llm-wiki 전체 흐름: 입력 소스(new/capture/inbox pull) → 로컬 위키(볼트) → git repo(vault sync, 머신 간 공유) / 원격 provider(sync, 단방향 발행)](docs/flow.png)
+![llm-wiki 전체 흐름: 입력 소스(new/capture/inbox pull) → 로컬 위키(볼트) → git repo(vault sync, 머신 간 공유) / 원격 provider(publish, 단방향 발행)](docs/flow.png)
 
 <!-- 위 이미지는 docs/flow.mmd(mermaid)에서 생성한다. 수정 후 재생성:
      npx -p @mermaid-js/mermaid-cli mmdc -i docs/flow.mmd -o docs/flow.png -t neutral -b white --scale 3 -->
 
 - **입력 소스** — 새 정보를 로컬 볼트로 받아오는 창구(`new` / `capture` / `inbox pull`). [자세히](#입력-소스)
 - **로컬 위키** — 볼트의 `raw/`·`wiki/` Markdown이 언제나 정본입니다. 볼트는 그냥 로컬 폴더(`local`)일 수도, git repo(`git`)일 수도 있습니다. git 백엔드는 `llmwiki vault sync`로 여러 머신에서 같은 위키를 작업하게 해줍니다. [자세히](#볼트-백엔드-local--git)
-- **원격 발행** — `llmwiki sync`로 로컬 위키를 원격 저장소에 단방향(local→원격)으로 동기화해 view로 보여줍니다. 원격 대상은 **provider**로 추상화되어 있어 현재 Notion을 지원하고 확장 가능합니다. [자세히](#원격-발행수집-sync--inbox)
+- **원격 발행** — `llmwiki publish`로 로컬 위키를 원격 저장소에 단방향(local→원격)으로 발행해 view로 보여줍니다. 원격 대상은 **provider**로 추상화되어 있어 현재 Notion을 지원하고 확장 가능합니다. [자세히](#원격-발행수집-publish--inbox)
 
-> **두 개의 다른 "동기화"**: `llmwiki vault sync`(git)는 *마크다운 파일 자체*를 머신 간에 공유하고, `llmwiki sync`(provider)는 *위키 view*를 Notion 등에 발행합니다. 두 축은 독립적이라 git 백엔드 볼트를 Notion에도 발행할 수 있습니다.
+> **파일 공유 vs. view 발행**: `llmwiki vault sync`(git)는 *마크다운 파일 자체*를 머신 간에 공유하고, `llmwiki publish`(provider)는 *위키 view*를 Notion 등에 발행합니다. 두 축은 독립적이라 git 백엔드 볼트를 Notion에도 발행할 수 있습니다.
 
 ## 설치
 
@@ -196,7 +196,7 @@ CLI는 관리형 워크스페이스를 준비한 뒤 에이전트를 실행하�
 | `llmwiki [claude\|codex]` | 통합 라우터 시작 |
 | `llmwiki new <입력>` | 에이전트를 띄워 URL/파일/텍스트를 ingest |
 | `llmwiki capture [options]` | 자유 텍스트 메모를 볼트 `raw/notes/`에 저장 |
-| `llmwiki sync [vault] [--dry-run]` | 로컬 위키를 원격(provider)으로 단방향 push |
+| `llmwiki publish [vault] [--dry-run]` | 로컬 위키를 원격(provider)으로 단방향 발행 (view) |
 | `llmwiki inbox pull [vault] [--dry-run]` | 원격(provider) inbox의 새 항목을 가져옴 |
 
 ### 에이전트 내부 명령 (라우터 세션 안에서 실행)
@@ -274,14 +274,14 @@ llmwiki inbox pull personal --dry-run           # Notion inbox 새 항목 미리
 
 > `new`·`capture`는 로컬 전용이고, `inbox pull`은 원격 provider 설정이 필요합니다.
 
-## 원격 발행/수집 (sync · inbox)
+## 원격 발행/수집 (publish · inbox)
 
-로컬에서 작업한 위키를 원격 저장소에 **단방향(local→원격)** 으로 push하고(`sync`), 원격 inbox에서 새 정보를 가져옵니다(`inbox pull`). 원격 대상은 **provider**로 추상화되어 있으며, 현재 Notion을 지원합니다.
+로컬에서 작업한 위키를 원격 저장소에 **단방향(local→원격)** 으로 발행하고(`publish`), 원격 inbox에서 새 정보를 가져옵니다(`inbox pull`). 원격 대상은 **provider**로 추상화되어 있으며, 현재 Notion을 지원합니다.
 
 ```bash
 export LLMWIKI_NOTION_TOKEN_PERSONAL=secret_xxx
-llmwiki sync personal --dry-run   # diff 미리보기 (토큰 없이도 가능)
-llmwiki sync personal             # 없는/바뀐 페이지만 push
+llmwiki publish personal --dry-run   # diff 미리보기 (토큰 없이도 가능)
+llmwiki publish personal             # 없는/바뀐 페이지만 push
 ```
 
 - 볼트별 설정은 `<vault>/_meta/remote.json`에 둡니다(토큰 제외, git 커밋). `provider`가 원격 대상을 결정합니다:
@@ -289,14 +289,14 @@ llmwiki sync personal             # 없는/바뀐 페이지만 push
   {
     "version": 1,
     "provider": "notion",
-    "sync": { "databaseId": "…", "syncedSubdirs": ["wiki/entities", "wiki/concepts", "wiki/sources", "wiki/analyses"] },
+    "publish": { "databaseId": "…", "syncedSubdirs": ["wiki/entities", "wiki/concepts", "wiki/sources", "wiki/analyses"] },
     "inbox": { "databaseId": "…" },
-    "allowSync": false
+    "allowPublish": false
   }
   ```
 - **토큰은 환경 변수에만** 둡니다(파일·git 금지). 조회 순서: `remote.json`의 `tokenEnv` → `LLMWIKI_<PROVIDER>_TOKEN_<VAULT>` → `LLMWIKI_<PROVIDER>_TOKEN` (예: `LLMWIKI_NOTION_TOKEN_PERSONAL`).
-- 동기화 상태는 `_meta/remote-map.json`에 슬러그별 `remoteId`·콘텐츠 해시로 기록합니다. 해시가 바뀐 페이지만 갱신하고, 원격→local 역방향이나 원격 페이지 삭제는 하지 않습니다.
-- `kind: secure` 볼트는 `remote.json`에 `"allowSync": true`가 있어야 하고, push 전 확인·익명화 게이트를 거칩니다.
+- 발행 상태는 `_meta/remote-map.json`에 슬러그별 `remoteId`·콘텐츠 해시로 기록합니다. 해시가 바뀐 페이지만 갱신하고, 원격→local 역방향이나 원격 페이지 삭제는 하지 않습니다.
+- `kind: secure` 볼트는 `remote.json`에 `"allowPublish": true`가 있어야 하고, push 전 확인·익명화 게이트를 거칩니다.
 - Notion provider는 `@notionhq/client`가 필요합니다(선택 의존성): `npm i @notionhq/client`.
 
 ### 새 provider 추가

@@ -135,8 +135,8 @@ test('vault add rejects a supplied --origin that mismatches an existing repo rem
   }
 });
 
-test('sync accepts --dry-run so it errors on config, not on the flag', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-syncflag-'));
+test('publish accepts --dry-run so it errors on config, not on the flag', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-pubflag-'));
   const paths = getPaths({ LLM_WIKI_CONFIG_HOME: path.join(root, 'config'), LLM_WIKI_DATA_HOME: path.join(root, 'data') });
   const vaultPath = path.join(root, 'vault');
   fs.mkdirSync(vaultPath, { recursive: true });
@@ -148,7 +148,7 @@ test('sync accepts --dry-run so it errors on config, not on the flag', async () 
   process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
   try {
     // --dry-run이 allowed에 없으면 "알 수 없는 옵션"으로 실패한다. 설정 부재 에러까지 도달해야 정상.
-    await assert.rejects(() => main(['sync', 'personal', '--dry-run']), /원격 sync 설정이 없습니다/);
+    await assert.rejects(() => main(['publish', 'personal', '--dry-run']), /원격 publish 설정이 없습니다/);
   } finally {
     if (prevConfig === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prevConfig;
     if (prevData === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prevData;
