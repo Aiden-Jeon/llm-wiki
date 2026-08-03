@@ -255,6 +255,65 @@ export async function configureRemote(paths, vault, opts = {}, { getProvider: re
   return true;
 }
 
+const PAGE_PARENT_MESSAGE = '새 데이터베이스를 만들 부모 페이지';
+const pageParentLabel = (pg) => `${pg.depth > 1 ? '  └ ' : ''}${pg.title || '(제목 없음)'}`;
+
+/**
+ * 부모 페이지 후보 중 하나를 고른다(TTY 전용). pages는 listPages가 준 depth 오름차순
+ * [{ id, title, depth }]. 반환: 선택된 page id | '__search__'(검색 요청) | '__expand__'(펼치기) | null(취소).
+ * expandable=false면 펼치기 옵션을 숨긴다(이미 전체/검색 결과를 보여줄 때).
+ */
+async function pickPageFrom(pages, { expandable } = {}) {
+  const topLevel = pages.filter((pg) => pg.depth <= 1);
+  // 최상위가 하나도 없으면(전부 조상이 결과 밖) 펼칠 것도 없이 전체를 보여준다.
+  const shown = expandable && topLevel.length ? topLevel : pages;
+  const canExpand = expandable && topLevel.length && pages.length > topLevel.length;
+
+  // 검색은 맨 위에 둔다 — 목록이 길면(특히 DB 행이 많으면) 맨 아래 옵션은 스크롤에 가려 안 보인다.
+  const options = [{ value: '__search__', label: '🔍 제목으로 검색' }];
+  if (canExpand) options.push({ value: '__expand__', label: '↓ 하위 페이지도 보기' });
+  for (const pg of shown) options.push({ value: pg.id, label: pageParentLabel(pg) });
+
+  // maxItems로 스크롤 창을 만든다 — 페이지가 많아도 화면을 뒤덮지 않고, 맨 위 검색 옵션이 늘 보인다.
+  const picked = await p.select({ message: PAGE_PARENT_MESSAGE, options, maxItems: 10 });
+  if (cancelPrompt(picked)) return null;
+  return picked;
+}
+
+/**
+ * 부모 페이지를 고른다(TTY 전용). 기본은 최상위(depth 1)만 보여 목록을 짧게 유지하고,
+ * 자식(depth 2 이상)이 있으면 "하위 페이지도 보기"로 펼친다. depth로 못 찾는(더 깊은) 페이지는
+ * "제목으로 검색"으로 Notion search에 query를 넘겨 찾는다. 반환: 선택된 page id | null(취소).
+ */
+async function choosePageParent(provider, client, pages, withSpinner) {
+  let picked = await pickPageFrom(pages, { expandable: true });
+  if (picked === null) return null;
+  if (picked === '__expand__') {
+    // 펼치기: 전체(depth 순)를 다시 보여준다(검색은 계속 가능).
+    picked = await pickPageFrom(pages, { expandable: false });
+    if (picked === null) return null;
+  }
+
+  // 검색: 결과가 나올 때까지(또는 취소까지) 질의를 반복한다.
+  while (picked === '__search__') {
+    const query = await p.text({ message: '검색어(페이지 제목)', placeholder: '예: Projects' });
+    if (cancelPrompt(query)) return null;
+    const term = (query || '').trim();
+    if (!term) { p.log.warn('검색어를 입력하세요.'); continue; }
+
+    // search는 조상 체인을 안 주므로 결과의 depth는 신뢰할 수 없다 → depth 필터 없이 보여주되,
+    // DB 행 페이지는 부모가 될 수 없으므로 제외한다.
+    const found = await withSpinner('검색 중', () => provider.listPages(client, { query: term, excludeDatabaseChildren: true }));
+    if (!found.length) { p.log.warn(`'${term}'에 해당하는 페이지가 없습니다.`); continue; }
+
+    const options = [{ value: '__search__', label: '🔍 다시 검색' }];
+    for (const pg of found) options.push({ value: pg.id, label: pg.title || '(제목 없음)' });
+    picked = await p.select({ message: PAGE_PARENT_MESSAGE, options, maxItems: 10 });
+    if (cancelPrompt(picked)) return null;
+  }
+  return picked;
+}
+
 /**
  * 대화형으로 원격 대상 데이터베이스를 정한다(TTY 전용). 새로 생성 / 기존 선택 / 건너뛰기.
  * checkSchema면 기존 DB 선택 시 publish 스키마와 비교해 누락/충돌을 보여주고 진행 여부를 묻는다.
@@ -285,16 +344,17 @@ async function selectRemoteDatabase(provider, client, { label, checkSchema, defa
       p.log.warn('이 provider는 데이터베이스 생성을 지원하지 않습니다. 기존 데이터베이스를 사용하세요.');
       return { cancelled: true };
     }
-    const pages = await withSpinner('페이지 목록 불러오는 중', () => provider.listPages(client, {}));
+    // 부모 후보는 최상위+직속 자식(depth≤2)까지만 — 깊은 하위 페이지까지 다 나오면 목록이 너무 길다.
+    // DB의 행 페이지는 새 DB의 부모가 될 수 없어 제외한다.
+    const pages = await withSpinner('페이지 목록 불러오는 중', () => provider.listPages(client, { maxDepth: 2, excludeDatabaseChildren: true }));
     if (!pages.length) {
       p.log.warn(`접근 가능한 페이지가 없습니다. ${provider.connectHelp || '대상을 provider에 연결한 뒤 다시 시도하세요.'}`);
       return { cancelled: true };
     }
-    const parent = await p.select({
-      message: '새 데이터베이스를 만들 부모 페이지',
-      options: pages.map((pg) => ({ value: pg.id, label: pg.title || '(제목 없음)' })),
-    });
-    if (cancelPrompt(parent)) return { cancelled: true };
+    // 기본은 최상위(depth 1)만 보여 목록을 짧게 유지하고, 자식(depth 2)이 있으면 펼치기 옵션을 준다.
+    // 제목 검색으로 목록에 없는(더 깊은) 페이지도 찾을 수 있다.
+    const parent = await choosePageParent(provider, client, pages, withSpinner);
+    if (parent === null) return { cancelled: true };
     const title = await p.text({ message: '새 데이터베이스 이름', defaultValue: defaultName, placeholder: defaultName });
     if (cancelPrompt(title)) return { cancelled: true };
     return withSpinner('데이터베이스 생성 중', () => provider.createDatabase(client, { parentPageId: parent, title: (title || defaultName).trim() }));
