@@ -10,6 +10,7 @@ import {
   main,
   parseOptions,
   prepareWorkspace,
+  publishRemove,
   serializeCommand,
   splitCommand,
 } from '../src/cli.js';
@@ -344,6 +345,49 @@ test('configureRemote (non-TTY) drops secure publish without --allow-publish but
   const config = loadRemoteConfig(paths.publish, 'work');
   assert.equal(config.publish, undefined); // secure + no allow-publish → publish 미설정
   assert.equal(config.inbox.databaseId, 'ibx');
+});
+
+test('publish remove (non-TTY) keeps the stored token by default', async () => {
+  const paths = tmpPaths();
+  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-prkeep-'));
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
+  await configureRemote(paths, { name: 'personal', path: vaultPath, kind: 'open' },
+    { remote: 'notion', 'remote-token': 'secret_x', 'publish-db': 'db1' },
+    { getProvider: () => stubProvider([]) });
+
+  const removed = await publishRemove(paths, ['personal']);
+
+  assert.equal(removed, true);
+  assert.equal(loadRemoteConfig(paths.publish, 'personal'), null); // 설정은 삭제됐다
+  assert.equal(getSecret(paths.secrets, 'notion', 'personal'), 'secret_x'); // 토큰은 유지됐다
+});
+
+test('publish remove --purge-token deletes the stored token without prompting', async () => {
+  const paths = tmpPaths();
+  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-prpurge-'));
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
+  await configureRemote(paths, { name: 'personal', path: vaultPath, kind: 'open' },
+    { remote: 'notion', 'remote-token': 'secret_x', 'publish-db': 'db1' },
+    { getProvider: () => stubProvider([]) });
+
+  const removed = await publishRemove(paths, ['personal', '--purge-token']);
+
+  assert.equal(removed, true);
+  assert.equal(loadRemoteConfig(paths.publish, 'personal'), null);
+  assert.equal(getSecret(paths.secrets, 'notion', 'personal'), undefined); // 토큰도 삭제됐다
+});
+
+test('publish remove rejects conflicting --keep-token and --purge-token', async () => {
+  const paths = tmpPaths();
+  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-prconf-'));
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
+  await configureRemote(paths, { name: 'personal', path: vaultPath, kind: 'open' },
+    { remote: 'notion', 'remote-token': 'secret_x', 'publish-db': 'db1' },
+    { getProvider: () => stubProvider([]) });
+  await assert.rejects(
+    () => publishRemove(paths, ['personal', '--keep-token', '--purge-token']),
+    /함께 쓸 수 없습니다/,
+  );
 });
 
 test('config export bundle carries no stored tokens', async () => {

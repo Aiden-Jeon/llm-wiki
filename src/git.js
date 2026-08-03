@@ -51,6 +51,20 @@ export function isGitRepo(dir) {
   return git(['rev-parse', '--is-inside-work-tree'], { cwd: dir }).ok;
 }
 
+/**
+ * 파일의 git 커밋 이력에서 생성·수정 날짜(YYYY-MM-DD)를 뽑는다. --follow로 rename도 추적한다.
+ * 이력이 없으면(아직 커밋 안 된 파일) null. relFile은 dir(저장소 루트) 기준 상대 경로.
+ * 반환: { created, updated } — created=최초 커밋일, updated=최근 커밋일.
+ */
+export function gitFileDates(dir, relFile) {
+  const result = git(['log', '--follow', '--format=%ad', '--date=short', '--', relFile], { cwd: dir });
+  if (!result.ok || !result.stdout) return null;
+  const dates = result.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+  if (!dates.length) return null;
+  // git log는 최신순으로 준다: 첫 줄이 최근(updated), 마지막 줄이 최초(created).
+  return { updated: dates[0], created: dates[dates.length - 1] };
+}
+
 // origin 원격 URL을 돌려준다. 없으면 빈 문자열.
 export function gitRemoteUrl(dir) {
   const result = git(['remote', 'get-url', 'origin'], { cwd: dir });

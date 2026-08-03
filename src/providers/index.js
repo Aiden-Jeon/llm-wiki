@@ -16,6 +16,7 @@
 //     createDatabase(client, { parentPageId, title }) → { databaseId, titleProperty }
 //     inspectDatabase(client, { databaseId }) → { title, titleProperty, missing[], conflicts[], ok }
 //     applySchema(client, { databaseId, missing }) → 추가한 속성 이름[]   누락 속성만 추가.
+//     createViews(client, { databaseId }) → 만든 뷰 이름[]   대상 DB에 뷰 탭을 자동 생성(초기 1회).
 //   출력(sync):
 //     defaultSyncSubdirs                 config에 없을 때 동기화할 wiki 서브디렉터리
 //     createRemotePage(client, ctx, page) → remoteId   신규 페이지 발행

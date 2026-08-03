@@ -2,6 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { parseWikiFrontmatter } from './lint.js';
+import { isGitRepo, gitFileDates } from './git.js';
+
+// 스키마 필수 필드지만 페이지에 없을 때 채울 기본값(내용에서 유추 못 하는 값은 지어내지 않는다).
+const STATUS_DEFAULT = 'active';
 
 // local → 원격 단방향 동기화. diff를 떠 없는/바뀐 페이지만 push한다. 절대 원격→local 안 함.
 // 실제 원격 호출(페이지 생성·갱신)은 provider가 담당하고, 이 모듈은 스캔·diff·상태 기록만 한다.
@@ -23,14 +27,33 @@ function listMarkdown(dir) {
 }
 
 /**
+ * 스키마 필수 필드지만 frontmatter에 없는 값을 결정론적으로 채운다. 원본 fields는 건드리지 않고
+ * 백필한 새 객체를 돌려준다. status는 기본값(active), created/updated는 git 이력 → 없으면 파일 mtime에서
+ * 유도한다. tags·sources·summary·confidence·source_url처럼 내용에서 유추 못 하는 값은 채우지 않는다.
+ * gitDates는 { created, updated }|null(테스트·비-git 볼트에서 주입 가능). fallbackDate는 mtime 대체.
+ */
+export function backfillFields(fields, { gitDates = null, fallbackDate } = {}) {
+  const filled = { ...fields };
+  if (filled.status === undefined) filled.status = STATUS_DEFAULT;
+  if (filled.created === undefined) filled.created = (gitDates && gitDates.created) || fallbackDate;
+  if (filled.updated === undefined) filled.updated = (gitDates && gitDates.updated) || fallbackDate;
+  return filled;
+}
+
+/**
  * 동기화 대상 서브디렉터리의 wiki 페이지를 읽어 { slug, fields, body, file } 배열로 돌려준다.
+ * 스키마 필수 필드가 비어 있으면 backfillFields로 결정론적 기본값을 채운다(발행 시 속성이 비지 않게).
  */
 export function scanLocalPages(vaultPath, subdirs) {
   const pages = [];
+  const gitRepo = isGitRepo(vaultPath);
   for (const subdir of subdirs) {
     for (const file of listMarkdown(path.join(vaultPath, subdir))) {
       const { fields, body } = parseWikiFrontmatter(fs.readFileSync(file, 'utf8'));
-      pages.push({ slug: path.basename(file, '.md'), fields, body, file });
+      const gitDates = gitRepo ? gitFileDates(vaultPath, path.relative(vaultPath, file)) : null;
+      const fallbackDate = fs.statSync(file).mtime.toISOString().slice(0, 10);
+      const filled = backfillFields(fields, { gitDates, fallbackDate });
+      pages.push({ slug: path.basename(file, '.md'), fields: filled, body, file });
     }
   }
   return pages;
@@ -75,7 +98,7 @@ export function loadRemoteMap(vaultPath) {
   if (!fs.existsSync(file)) return { version: 1, pages: {} };
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return { version: parsed.version || 1, provider: parsed.provider, pages: parsed.pages || {} };
+    return { version: parsed.version || 1, provider: parsed.provider, viewsCreated: parsed.viewsCreated, pages: parsed.pages || {} };
   } catch (error) {
     throw new Error(`${file} 파싱 실패: ${error.message}`);
   }
@@ -108,6 +131,7 @@ export async function pushSync(vaultPath, { provider, client, ctx = {}, subdirs,
     unchanged: diff.unchanged.length,
     planned: { create: diff.create.length, update: diff.update.length },
     dryRun,
+    viewsCreated: null, // 이번 실행에서 만든 뷰 이름 배열(생성 안 했으면 null)
   };
   if (dryRun) return summary;
 
@@ -130,6 +154,18 @@ export async function pushSync(vaultPath, { provider, client, ctx = {}, subdirs,
       title: page.fields.title || page.slug,
     };
   }
+
+  // 첫 발행 시 대상 DB에 뷰 탭을 자동 생성한다(초기 1회, map 플래그로 idempotent).
+  // 뷰 생성 실패는 발행 자체를 깨뜨리지 않는다(발행은 이미 끝났다) — 경고만 담는다.
+  if (!map.viewsCreated && ctx.databaseId && typeof provider.createViews === 'function') {
+    try {
+      summary.viewsCreated = await provider.createViews(client, { databaseId: ctx.databaseId });
+      map.viewsCreated = now;
+    } catch (error) {
+      summary.viewsError = error.message;
+    }
+  }
+
   saveRemoteMap(vaultPath, map);
   return summary;
 }

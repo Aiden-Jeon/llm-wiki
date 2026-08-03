@@ -71,6 +71,13 @@ export function getSecret(secretsPath, provider, vaultName) {
   return shared && shared.token ? shared.token : undefined;
 }
 
+/** 볼트별 토큰(provider:<VAULT>)이 저장돼 있으면 true. 공용 provider:* 폴백은 세지 않는다. */
+export function hasSecret(secretsPath, provider, vaultName) {
+  const store = loadSecrets(secretsPath);
+  const entry = store.tokens[secretKey(provider, vaultName)];
+  return Boolean(entry && entry.token);
+}
+
 /** 토큰을 저장한다(provider:<VAULT> 또는 볼트 미지정 시 provider:*). */
 export function setSecret(secretsPath, provider, vaultName, token) {
   const store = loadSecrets(secretsPath);

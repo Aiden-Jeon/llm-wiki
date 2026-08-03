@@ -198,6 +198,7 @@ CLI는 관리형 워크스페이스를 준비한 뒤 에이전트를 실행하�
 | `llmwiki capture [options]` | 자유 텍스트 메모를 볼트 `raw/notes/`에 저장 |
 | `llmwiki publish [vault] [--dry-run]` | 로컬 위키를 원격(provider)으로 단방향 발행 (view) |
 | `llmwiki publish add/list/remove` | 발행 설정을 관리 (볼트와 분리, 전역 `publish.json`) |
+| `llmwiki publish view [vault]` | 대상 DB에 뷰 탭(Table/Board/Gallery/List) 강제 재생성 (평소엔 첫 발행 때 자동) |
 | `llmwiki inbox pull [vault] [--dry-run]` | 원격(provider) inbox의 새 항목을 가져옴 |
 
 ### 에이전트 내부 명령 (라우터 세션 안에서 실행)
@@ -279,7 +280,7 @@ llmwiki inbox pull personal --dry-run           # Notion inbox 새 항목 미리
 
 로컬에서 작업한 위키를 원격 저장소에 **단방향(local→원격)** 으로 발행하고(`publish`), 원격 inbox에서 새 정보를 가져옵니다(`inbox pull`). 원격 대상은 **provider**로 추상화되어 있으며, 현재 Notion을 지원합니다.
 
-발행 설정은 볼트와 분리돼 있어 `publish add`로 따로 연결합니다(볼트 추가와 독립). 대화형(TTY)으로 실행하면 토큰을 넣은 뒤 **대상 데이터베이스를 새로 만들지 / 기존 것을 쓸지** 물어보므로 DB id를 직접 찾을 필요가 없습니다. 저장 전에 provider API로 검증(토큰 유효성 + 대상 DB)한 뒤, 토큰은 설정 디렉터리 `secrets.json`(`0600`)에, 대상 설정은 전역 `publish.json`에 기록합니다.
+발행 설정은 볼트와 분리돼 있어 `publish add`로 따로 연결합니다(볼트 추가와 독립). 대화형(TTY)으로 실행하면 토큰을 넣은 뒤 **대상 데이터베이스를 새로 만들지 / 기존 것을 쓸지** 물어보므로 DB id를 직접 찾을 필요가 없습니다. 이미 저장·설정된 토큰(env 또는 `secrets.json`)이 있으면 재입력 없이 재사용합니다. 저장 전에 provider API로 검증(토큰 유효성 + 대상 DB)한 뒤, 토큰은 설정 디렉터리 `secrets.json`(`0600`)에, 대상 설정은 전역 `publish.json`에 기록합니다.
 
 ```bash
 # 볼트는 발행과 무관하게 먼저 등록
@@ -297,7 +298,7 @@ llmwiki publish add personal \
 llmwiki publish list                 # 등록된 발행 설정 확인
 llmwiki publish personal --dry-run   # diff 미리보기 (토큰 없이도 가능)
 llmwiki publish personal             # 없는/바뀐 페이지만 push (저장된 토큰 사용, 재입력 불필요)
-llmwiki publish remove personal      # 발행 설정 삭제 (--purge-token으로 토큰까지)
+llmwiki publish remove personal      # 발행 설정 삭제(저장된 토큰은 물어본 뒤 삭제, --purge-token/--keep-token)
 ```
 
 - 발행 설정은 전역 config의 `publish.json`에 볼트 이름을 키로 둡니다(토큰 제외). `provider`가 원격 대상을 결정합니다:
@@ -318,7 +319,7 @@ llmwiki publish remove personal      # 발행 설정 삭제 (--purge-token으로
 - **토큰은 env 또는 설정 디렉터리 `secrets.json`에만** 둡니다(레지스트리·git·`publish.json` 저장 금지). `secrets.json`은 `0600`이며 `.gitignore`·`config export`에서 제외됩니다. 조회 순서: `publish.json` 엔트리의 `tokenEnv`(env) → `LLMWIKI_<PROVIDER>_TOKEN_<VAULT>`(env) → `LLMWIKI_<PROVIDER>_TOKEN`(env) → `secrets.json`. env가 store보다 우선이라 CI·스크립트에서 저장 토큰을 덮어쓸 수 있습니다.
 - 발행 상태는 `_meta/remote-map.json`에 슬러그별 `remoteId`·콘텐츠 해시로 기록합니다. 해시가 바뀐 페이지만 갱신하고, 원격→local 역방향이나 원격 페이지 삭제는 하지 않습니다.
 - `kind: secure` 볼트는 `publish.json` 엔트리에 `"allowPublish": true`가 있어야 하고(`publish add --allow-publish`), push 전 확인·익명화 게이트를 거칩니다.
-- Notion provider는 `@notionhq/client`가 필요합니다(선택 의존성): `npm i @notionhq/client`.
+- Notion provider는 `@notionhq/client` 5.x가 필요합니다(선택 의존성): `npm i @notionhq/client`. 발행·inbox는 하위 버전도 되지만 `publish view`(뷰 자동 생성)는 5.x의 Views API가 필요합니다.
 
 #### Notion 데이터베이스 속성과 뷰
 
@@ -335,11 +336,20 @@ llmwiki publish remove personal      # 발행 설정 삭제 (--purge-token으로
 | `created` / `updated` | `Created` / `Updated` | Date |
 | `source_url` | `Source URL` | URL |
 
-권장 뷰 구성(발행은 단방향이라 Notion에서 뷰를 바꿔도 로컬·발행 로직에 영향 없음):
+발행되는 각 행에는 `type`별 아이콘(🏢 entity · 🧩 concept · 📄 source · 🔍 analysis, 그 외 📝)이 자동으로 붙어 Board·Gallery 카드에서 한눈에 구분됩니다.
 
-- **Table** — 기본 정본 뷰. `Updated` 내림차순 정렬, `Status ≠ archived` 필터. `Summary` 컬럼을 켜면 페이지를 열지 않고 내용을 스캔할 수 있습니다.
-- **Board** — `Type`으로 그룹핑해 entity/concept/source/analysis 네 축을 한눈에 봅니다.
-- **List** — `Updated` 최신순 상위 N개로 "최근 작업" 빠른 접근.
+통짜 표를 벗어나도록, **첫 발행 때 대상 DB에 뷰 탭이 자동으로 생성됩니다**(`@notionhq/client` 5.x 필요). 이미 만들었는지는 `_meta/remote-map.json`의 플래그로 추적해 탭이 중복되지 않으며, 이후 발행에선 건너뜁니다.
+
+- **All** (Table) — `Updated` 내림차순 정본 뷰.
+- **By Type** (Board) — `Type`으로 그룹핑해 entity/concept/source/analysis 네 축을 한눈에.
+- **Gallery** — 아이콘이 크게 보이는 카드 뷰.
+- **Recent** (List) — `Updated` 최신순 "최근 작업" 뷰.
+
+발행은 단방향이라 Notion에서 뷰를 손보거나 탭 순서를 바꿔도 로컬·발행 로직에 영향이 없습니다. 뷰를 지웠다가 다시 만들고 싶으면 `llmwiki publish view <vault>`로 강제 재생성합니다(중복 방지를 하지 않으니 필요할 때만).
+
+```bash
+llmwiki publish view personal        # 뷰 탭 강제 재생성 (평소엔 첫 발행 때 자동)
+```
 
 ### 새 provider 추가
 

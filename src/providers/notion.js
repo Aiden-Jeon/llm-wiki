@@ -42,6 +42,17 @@ function propertyDefinition(type) {
   return { [type]: {} };
 }
 
+// Type별 페이지 아이콘(이모지). 발행 행이 Gallery/Board 카드에서 한눈에 구분되게 한다.
+const TYPE_ICON = { entity: '🏢', concept: '🧩', source: '📄', analysis: '🔍' };
+
+/**
+ * frontmatter의 type을 Notion 페이지 아이콘(이모지 객체)으로 매핑한다. 순수 함수.
+ * 미지정·미지의 타입은 기본 📝. pages.create/update의 top-level icon으로 넘긴다.
+ */
+export function iconForType(type) {
+  return { type: 'emoji', emoji: TYPE_ICON[type] || '📝' };
+}
+
 /**
  * @notionhq/client를 지연 로딩해 클라이언트를 만든다. 코어 CLI가 이 선택 의존성에
  * 하드 링크되지 않도록 동적 import를 쓴다. 미설치 시 친절한 안내를 던진다.
@@ -97,6 +108,13 @@ export async function verifyDatabase(client, { databaseId } = {}) {
 
 // ── 대상 DB 선택/생성/스키마 (provider 인터페이스, 선택) ────────────────────
 
+// API 2025-09-03부터 속성(스키마·값)은 database가 아니라 data_source에 있다.
+// database를 조회해 첫 data_source의 id를 돌려준다(구버전 응답이면 database id로 폴백).
+export async function resolveDataSourceId(client, databaseId) {
+  const db = await client.databases.retrieve({ database_id: databaseId });
+  return (db.data_sources && db.data_sources[0] && db.data_sources[0].id) || db.id;
+}
+
 // DB의 properties 맵에서 title 타입 속성의 이름을 찾는다. publish는 이 이름을 titleProperty로 쓴다.
 export function findTitleProperty(db) {
   const props = (db && db.properties) || {};
@@ -130,19 +148,28 @@ export function diffPublishSchema(db) {
 
 /**
  * 워크스페이스에서 integration이 접근 가능한 데이터베이스를 검색한다(search API).
- * 반환: [{ id, title }]. query로 제목 필터(선택).
+ * API 2025-09-03부터 search는 database가 아니라 data_source를 반환하므로 data_source를 찾고
+ * 각 항목의 부모 database id(database_parent.database_id)를 뽑는다. 반환: [{ id, title }].
+ * id는 publish 대상으로 쓰는 database id다. query로 제목 필터(선택).
  */
 export async function listDatabases(client, { query, pageSize = 100 } = {}) {
   const results = [];
+  const seen = new Set();
   let cursor;
   do {
     const response = await client.search({
       query: query || undefined,
-      filter: { property: 'object', value: 'database' },
+      filter: { property: 'object', value: 'data_source' },
       start_cursor: cursor,
       page_size: pageSize,
     });
-    for (const db of response.results || []) results.push({ id: db.id, title: extractDatabaseTitle(db) || '(제목 없음)' });
+    for (const ds of response.results || []) {
+      const parent = ds.database_parent;
+      const databaseId = parent && parent.type === 'database_id' ? parent.database_id : ds.id;
+      if (seen.has(databaseId)) continue; // 한 DB에 data_source가 여럿일 수 있어 중복 제거.
+      seen.add(databaseId);
+      results.push({ id: databaseId, title: extractDatabaseTitle(ds) || '(제목 없음)' });
+    }
     cursor = response.has_more ? response.next_cursor : undefined;
   } while (cursor);
   return results;
@@ -170,7 +197,8 @@ export async function listPages(client, { query, pageSize = 100 } = {}) {
 
 /**
  * 부모 페이지 아래에 publish 스키마를 갖춘 새 데이터베이스를 만든다.
- * 반환: { databaseId, titleProperty }.
+ * API 2025-09-03부터 속성은 database가 아니라 초기 data_source에 실어야 하므로
+ * initial_data_source.properties로 보낸다. 반환: { databaseId, titleProperty }.
  */
 export async function createDatabase(client, { parentPageId, title } = {}) {
   if (!parentPageId) throw new Error('새 데이터베이스를 만들 부모 페이지 id가 필요합니다.');
@@ -180,32 +208,40 @@ export async function createDatabase(client, { parentPageId, title } = {}) {
     const db = await client.databases.create({
       parent: { type: 'page_id', page_id: parentPageId },
       title: [{ type: 'text', text: { content: String(title || 'llm-wiki') } }],
-      properties,
+      initial_data_source: { properties },
     });
-    return { databaseId: db.id, titleProperty: findTitleProperty(db) };
+    // title 속성 이름은 만들어진 data_source에서 읽는다(databases.create 응답엔 properties가 없음).
+    const dataSourceId = (db.data_sources && db.data_sources[0] && db.data_sources[0].id) || db.id;
+    let titleProperty = 'Name';
+    try {
+      const ds = await client.dataSources.retrieve({ data_source_id: dataSourceId });
+      titleProperty = findTitleProperty(ds);
+    } catch { /* 조회 실패 시 기본 'Name' 유지 */ }
+    return { databaseId: db.id, titleProperty };
   } catch (error) {
     throw new Error(`Notion 데이터베이스 생성 실패 — ${notionErrorMessage(error)}`);
   }
 }
 
 /**
- * 대상 DB를 조회해 원본과 스키마 diff를 함께 돌려준다. 성공 시
+ * 대상 DB의 data_source를 조회해 원본과 스키마 diff를 함께 돌려준다. 성공 시
  * { title, titleProperty, missing[], conflicts[], ok }, 실패 시 에러.
  */
 export async function inspectDatabase(client, { databaseId } = {}) {
   if (!databaseId) throw new Error('데이터베이스 id가 필요합니다.');
-  let db;
+  let ds;
   try {
-    db = await client.databases.retrieve({ database_id: databaseId });
+    const dataSourceId = await resolveDataSourceId(client, databaseId);
+    ds = await client.dataSources.retrieve({ data_source_id: dataSourceId });
   } catch (error) {
     throw new Error(`Notion 데이터베이스(${databaseId}) 확인 실패 — ${notionErrorMessage(error)}`);
   }
-  return { title: extractDatabaseTitle(db), ...diffPublishSchema(db) };
+  return { title: extractDatabaseTitle(ds), ...diffPublishSchema(ds) };
 }
 
 /**
- * 누락 속성만 대상 DB에 추가한다(databases.update). 타입 충돌은 파괴 위험이라 건드리지 않는다.
- * missing은 diffPublishSchema가 준 이름 배열. 반환: 추가한 속성 이름 배열.
+ * 누락 속성만 대상 DB의 data_source에 추가한다(dataSources.update). 타입 충돌은 파괴 위험이라
+ * 건드리지 않는다. missing은 diffPublishSchema가 준 이름 배열. 반환: 추가한 속성 이름 배열.
  */
 export async function applySchema(client, { databaseId, missing = [] } = {}) {
   if (!databaseId) throw new Error('데이터베이스 id가 필요합니다.');
@@ -217,11 +253,98 @@ export async function applySchema(client, { databaseId, missing = [] } = {}) {
     if (type && type !== 'title') properties[propName] = propertyDefinition(type);
   }
   try {
-    await client.databases.update({ database_id: databaseId, properties });
+    const dataSourceId = await resolveDataSourceId(client, databaseId);
+    await client.dataSources.update({ data_source_id: dataSourceId, properties });
     return Object.keys(properties);
   } catch (error) {
     throw new Error(`Notion 데이터베이스 스키마 갱신 실패 — ${notionErrorMessage(error)}`);
   }
+}
+
+// ── 뷰 자동 생성 (Views API, @notionhq/client 5.x 필요) ───────────────────
+
+/**
+ * 소스 DB에 얹을 뷰 4종의 views.create 요청 바디를 만든다. 순수 함수(네트워크 없음).
+ * Views API는 data_source_id에 더해 database_id/view_id/create_database 중 정확히 하나를 요구하므로
+ * database_id도 함께 넣는다. propertyIds는 { Type: id } 맵(board group_by는 property_id를 씀),
+ * propertyNames는 존재하는 속성 이름 집합(sorts는 속성 이름을 씀 — { property: 이름, direction } 형태).
+ * 필요한 속성이 없으면 해당 뷰/정렬은 건너뛴다. 반환: views.create에 그대로 넘길 요청 객체 배열.
+ */
+export function buildViewRequests({ dataSourceId, databaseId, propertyIds = {}, propertyNames = [] } = {}) {
+  if (!dataSourceId) throw new Error('뷰를 만들려면 data_source_id가 필요합니다.');
+  if (!databaseId) throw new Error('뷰를 만들려면 database_id가 필요합니다.');
+  const typeId = propertyIds.Type;
+  const names = new Set(propertyNames);
+  const base = { data_source_id: dataSourceId, database_id: databaseId };
+  const updatedSort = names.has('Updated') ? { sorts: [{ property: 'Updated', direction: 'descending' }] } : {};
+  const requests = [];
+
+  // All — 최근 수정 순 Table(정본).
+  requests.push({ ...base, name: 'All', type: 'table', ...updatedSort });
+
+  // By Type — Type으로 그룹핑한 Board. Type 속성이 있을 때만.
+  if (typeId) {
+    requests.push({
+      ...base,
+      name: 'By Type',
+      type: 'board',
+      configuration: {
+        type: 'board',
+        group_by: { type: 'select', property_id: typeId, sort: { type: 'ascending' } },
+      },
+    });
+  }
+
+  // Gallery — 카드 뷰(아이콘이 카드에 크게 보인다).
+  requests.push({
+    ...base,
+    name: 'Gallery',
+    type: 'gallery',
+    configuration: { type: 'gallery', card_layout: 'compact' },
+  });
+
+  // Recent — 최근 수정 순 List.
+  requests.push({ ...base, name: 'Recent', type: 'list', ...updatedSort });
+
+  return requests;
+}
+
+/**
+ * 대상 DB에 뷰 탭(All/By Type/Gallery/Recent)을 자동으로 만든다. Views API가 필요하므로
+ * @notionhq/client 5.x 이상에서만 동작한다(client.views 부재 시 친절한 에러).
+ * databases.retrieve로 data_source_id와 속성 id를 뽑아 buildViewRequests로 요청을 만들고
+ * 순차 생성한다. 반환: 만든 뷰 이름 배열. 뷰 탭 재정렬·중복 방지는 하지 않는다(초기 1회용).
+ */
+export async function createViews(client, { databaseId } = {}) {
+  if (!databaseId) throw new Error('데이터베이스 id가 필요합니다.');
+  if (!client.views || typeof client.views.create !== 'function') {
+    throw new Error('뷰 자동 생성은 @notionhq/client 5.x가 필요합니다: npm i @notionhq/client@^5');
+  }
+  // 속성(property_id)은 database가 아니라 data_source에 있으므로 data_source를 조회한다.
+  let dataSourceId;
+  let ds;
+  try {
+    dataSourceId = await resolveDataSourceId(client, databaseId);
+    ds = await client.dataSources.retrieve({ data_source_id: dataSourceId });
+  } catch (error) {
+    throw new Error(`Notion 데이터베이스(${databaseId}) 확인 실패 — ${notionErrorMessage(error)}`);
+  }
+  const propertyIds = {};
+  const propertyNames = [];
+  for (const [propName, value] of Object.entries(ds.properties || {})) {
+    propertyNames.push(propName);
+    if (value && value.id) propertyIds[propName] = value.id;
+  }
+  const created = [];
+  try {
+    for (const request of buildViewRequests({ dataSourceId, databaseId, propertyIds, propertyNames })) {
+      await client.views.create(request);
+      created.push(request.name);
+    }
+  } catch (error) {
+    throw new Error(`Notion 뷰 생성 실패 — ${notionErrorMessage(error)}`);
+  }
+  return created;
 }
 
 // ── 마크다운 → Notion 블록 ────────────────────────────────────────────────
@@ -373,6 +496,7 @@ export async function createRemotePage(client, ctx, page) {
   const [first, ...restChunks] = chunkBlocks(markdownToBlocks(page.body));
   const created = await client.pages.create({
     parent: { database_id: ctx.databaseId },
+    icon: iconForType(page.fields.type),
     properties: props,
     children: first || [],
   });
@@ -388,7 +512,7 @@ export async function createRemotePage(client, ctx, page) {
  */
 export async function updateRemotePage(client, ctx, remoteId, page) {
   const props = frontmatterToProperties(page.fields, { titleProp: ctx.titleProp });
-  await client.pages.update({ page_id: remoteId, properties: props });
+  await client.pages.update({ page_id: remoteId, icon: iconForType(page.fields.type), properties: props });
   const existing = await client.blocks.children.list({ block_id: remoteId });
   for (const child of existing.results || []) {
     await client.blocks.delete({ block_id: child.id });
@@ -438,12 +562,14 @@ export function itemId(item) {
 }
 
 // 인박스 데이터베이스를 페이지네이션하며 모든 항목을 모은다. ctx = { databaseId }.
+// API 2025-09-03부터 질의는 database가 아니라 data_source 대상이므로 먼저 id를 해소한다.
 export async function listInboxItems(client, ctx, { pageSize = 100 } = {}) {
+  const dataSourceId = await resolveDataSourceId(client, ctx.databaseId);
   const results = [];
   let cursor;
   do {
-    const response = await client.databases.query({
-      database_id: ctx.databaseId,
+    const response = await client.dataSources.query({
+      data_source_id: dataSourceId,
       start_cursor: cursor,
       page_size: pageSize,
     });

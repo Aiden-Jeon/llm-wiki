@@ -37,7 +37,7 @@ import { loadRemoteConfig, upsertRemoteConfig, removeRemoteConfig, listRemoteCon
 import { renderNote } from './note.js';
 import { getProvider, listProviders } from './providers/index.js';
 import { resolveRemoteToken } from './providers/token.js';
-import { setSecret, deleteSecret } from './secrets.js';
+import { setSecret, deleteSecret, hasSecret } from './secrets.js';
 import { pushSync } from './sync.js';
 import { pullInbox } from './inbox.js';
 import {
@@ -60,8 +60,9 @@ const VAULT_SYNC_USAGE = 'llmwiki vault sync [name] [--message <msg>] [--no-push
 const CAPTURE_USAGE = 'llmwiki capture [--vault <name>] [--title <제목>] [--text <내용>]';
 const PUBLISH_USAGE = 'llmwiki publish [vault] [--dry-run] [--limit <n>]';
 const PUBLISH_ADD_USAGE = 'llmwiki publish add [vault] [--remote <provider>] [--remote-token <token>] [--publish-db <id>] [--inbox-db <id>] [--title-prop <name>] [--allow-publish]';
-const PUBLISH_REMOVE_USAGE = 'llmwiki publish remove [vault] [--purge-token]';
+const PUBLISH_REMOVE_USAGE = 'llmwiki publish remove [vault] [--keep-token | --purge-token]';
 const PUBLISH_LIST_USAGE = 'llmwiki publish list [--json]';
+const PUBLISH_VIEW_USAGE = 'llmwiki publish view [vault]';
 const CONFIG_EXPORT_USAGE = 'llmwiki config export [--output <file>]';
 const CONFIG_IMPORT_USAGE = 'llmwiki config import <file> [--vaults-dir <dir>] [--force]';
 const INBOX_USAGE = 'llmwiki inbox pull [vault] [--dry-run] [--limit <n>]';
@@ -80,7 +81,7 @@ const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운영합�
   llmwiki publish [vault] [--dry-run] [--limit <n>]   로컬 위키를 원격에 발행 (view, 단방향)
   llmwiki publish add [vault] [options]  볼트에 원격 provider를 연결 (발행 설정)
   llmwiki publish list [--json]   등록된 발행 설정 목록
-  llmwiki publish remove [vault] [--purge-token]  발행 설정 삭제
+  llmwiki publish remove [vault]  발행 설정 삭제(저장된 토큰은 물어본 뒤 삭제)
   llmwiki inbox pull [vault] [--dry-run] [--limit <n>]  원격 inbox의 새 항목을 가져옴
   llmwiki setup                   초기 설정 및 볼트 등록
   llmwiki vault add [options]     볼트 추가/수정
@@ -472,20 +473,33 @@ export async function configureRemote(paths, vault, opts = {}, { getProvider: re
     return false;
   }
 
-  // 토큰: 플래그 우선, 없으면 TTY에서 password 프롬프트(에코 방지).
+  // 토큰: 플래그 우선. 없으면 이미 저장/설정된 토큰(env·secrets store)을 조용히 찾아 재사용하고,
+  // 그래도 없을 때만 TTY에서 새로 입력받는다.
   let token = opts['remote-token'];
   if (!token) {
-    if (!tty) throw new Error(`--remote 사용 시 --remote-token이 필요합니다.\n사용법: ${PUBLISH_ADD_USAGE}`);
-    // provider가 발급 안내를 제공하면 토큰 입력 전에 보여준다(어디서 받는지 막막하지 않게).
-    // p.note는 CJK·긴 URL에서 테두리가 틀어지므로 displayWidth 기반 renderNote로 그린다.
-    if (provider.tokenHelp) {
-      const help = provider.tokenHelp;
-      const body = [help.url && `토큰 발급: ${help.url}`, ...(help.lines || [])].filter(Boolean).join('\n');
-      if (body) console.log(renderNote(body, `${provider.name} 토큰 발급 안내`));
+    let existing;
+    try {
+      existing = resolveRemoteToken(process.env, {
+        prefix: provider.tokenPrefix, vaultName: vault.name, secretsPath: paths.secrets, provider: provider.name,
+      });
+    } catch { existing = undefined; } // 저장된 토큰이 없으면 새로 입력받는다.
+
+    if (existing) {
+      token = existing;
+      if (tty) p.log.info(`저장된 ${provider.name} 토큰을 재사용합니다.`);
+    } else {
+      if (!tty) throw new Error(`--remote 사용 시 --remote-token이 필요합니다.\n사용법: ${PUBLISH_ADD_USAGE}`);
+      // provider가 발급 안내를 제공하면 토큰 입력 전에 보여준다(어디서 받는지 막막하지 않게).
+      // p.note는 CJK·긴 URL에서 테두리가 틀어지므로 displayWidth 기반 renderNote로 그린다.
+      if (provider.tokenHelp) {
+        const help = provider.tokenHelp;
+        const body = [help.url && `토큰 발급: ${help.url}`, ...(help.lines || [])].filter(Boolean).join('\n');
+        if (body) console.log(renderNote(body, `${provider.name} 토큰 발급 안내`));
+      }
+      const entered = await p.password({ message: `${provider.name} 토큰`, mask: '•' });
+      if (cancelPrompt(entered)) return false;
+      token = entered;
     }
-    const entered = await p.password({ message: `${provider.name} 토큰`, mask: '•' });
-    if (cancelPrompt(entered)) return false;
-    token = entered;
   }
 
   // 클라이언트 생성 + 토큰 검증을 먼저 한다(대화형 대상 선택이 client를 쓴다).
@@ -707,12 +721,21 @@ function publishList(paths, args) {
 }
 
 /**
- * `llmwiki publish remove [vault] [--purge-token]`: 발행 설정 엔트리를 지운다.
- * --purge-token(또는 TTY 확인)이면 저장된 provider 토큰도 함께 삭제한다.
+ * `llmwiki publish remove [vault]`: 발행 설정 엔트리를 지운다.
+ * 볼트별로 저장된 provider 토큰(secretKey `provider:<VAULT>`)은 재발급이 번거로우므로 자동으로
+ * 지우지 않고 사용자에게 삭제 여부를 물어본다(공용 `provider:*` 토큰과 다른 볼트 토큰은 건드리지 않는다).
+ * `--purge-token`/`--keep-token`으로 질문 없이 강제할 수 있고, 비대화형 환경은 기본적으로 토큰을 유지한다.
  */
-async function publishRemove(paths, args) {
-  const { options, rest } = parseOptions(args, { allowed: ['purge-token'], booleans: ['purge-token'], usage: PUBLISH_REMOVE_USAGE });
+export async function publishRemove(paths, args) {
+  const { options, rest } = parseOptions(args, {
+    allowed: ['keep-token', 'purge-token'],
+    booleans: ['keep-token', 'purge-token'],
+    usage: PUBLISH_REMOVE_USAGE,
+  });
   if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${PUBLISH_REMOVE_USAGE}`);
+  if (options['keep-token'] && options['purge-token']) {
+    throw new Error('--keep-token과 --purge-token은 함께 쓸 수 없습니다.');
+  }
   const tty = Boolean(stdin.isTTY);
   const vault = await resolveRemoteVault(paths, rest[0], PUBLISH_REMOVE_USAGE);
   if (!vault) return false;
@@ -723,17 +746,41 @@ async function publishRemove(paths, args) {
     return false;
   }
 
-  const removed = removeRemoteConfig(paths.publish, vault.name);
-
-  let purgeToken = options['purge-token'] === true;
-  if (!purgeToken && tty) {
-    const ok = await p.confirm({ message: `저장된 ${config.provider || DEFAULT_PROVIDER} 토큰도 삭제할까요?`, initialValue: false });
-    purgeToken = !cancelPrompt(ok) && ok === true;
+  const provider = config.provider || DEFAULT_PROVIDER;
+  // 볼트별로 저장된 provider 토큰이 있을 때만 삭제 여부를 결정한다. 공용 provider:* 토큰은
+  // 다른 볼트도 쓸 수 있으므로 건드리지 않는다.
+  const tokenStored = hasSecret(paths.secrets, provider, vault.name);
+  let deleteToken;
+  if (!tokenStored) {
+    deleteToken = false;
+  } else if (options['purge-token']) {
+    deleteToken = true;
+  } else if (options['keep-token']) {
+    deleteToken = false;
+  } else if (tty) {
+    // 토큰은 재발급이 번거로우므로 사용자에게 물어보고, 명시적 동의가 있을 때만 지운다.
+    const answer = await p.confirm({
+      message: `${vault.name} 볼트에 저장된 ${provider} 토큰도 삭제할까요?`,
+      initialValue: false,
+    });
+    if (cancelPrompt(answer)) return false;
+    deleteToken = answer;
+  } else {
+    // 비대화형(스크립트) 환경에서는 물어볼 수 없으므로 토큰을 보존한다.
+    // 삭제하려면 --purge-token을 명시한다.
+    deleteToken = false;
   }
-  if (purgeToken) deleteSecret(paths.secrets, config.provider || DEFAULT_PROVIDER, vault.name);
 
-  const summary = `발행 설정 삭제 · ${vault.name}${purgeToken ? ' · 토큰 삭제됨' : ''}`;
+  const removed = removeRemoteConfig(paths.publish, vault.name);
+  const tokenRemoved = deleteToken && deleteSecret(paths.secrets, provider, vault.name);
+
+  let summary = `발행 설정 삭제 · ${vault.name}`;
+  if (tokenRemoved) summary += ' · 토큰 삭제됨';
+  else if (tokenStored) summary += ' · 토큰 유지됨';
   if (tty) p.log.success(summary); else console.log(summary);
+  if (!tty && tokenStored && !deleteToken) {
+    console.log(`저장된 ${provider} 토큰은 유지됩니다. 삭제하려면 --purge-token을 사용하세요.`);
+  }
   return removed;
 }
 
@@ -1659,6 +1706,41 @@ async function publish(paths, args) {
     : `publish 완료 · ${vault.name} → ${provider.name} · 생성 ${summary.created} · 갱신 ${summary.updated} · 변경 없음 ${summary.unchanged}`;
   if (stdin.isTTY) p.log.success(message);
   else console.log(message);
+
+  // 첫 발행에서 뷰 탭을 만들었으면 알리고, 실패했으면 발행은 유지한 채 경고만 낸다.
+  if (!dryRun && summary.viewsCreated && summary.viewsCreated.length) {
+    const note = `뷰 생성 · ${summary.viewsCreated.join(', ')}`;
+    if (stdin.isTTY) p.log.success(note); else console.log(note);
+  } else if (!dryRun && summary.viewsError) {
+    const note = `뷰 생성은 건너뜀 — ${summary.viewsError} (\`llmwiki publish view ${vault.name}\`로 재시도)`;
+    if (stdin.isTTY) p.log.warn(note); else console.error(note);
+  }
+  return true;
+}
+
+// `llmwiki publish view [vault]`: 발행 대상 DB에 뷰 탭(Table/Board/Gallery/List)을 자동 생성한다.
+// 발행(publish)과 별개인 초기 1회성 작업이다. @notionhq/client 5.x가 필요하다.
+async function publishView(paths, args) {
+  const { rest } = parseOptions(args, { allowed: [], usage: PUBLISH_VIEW_USAGE });
+  if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${PUBLISH_VIEW_USAGE}`);
+
+  const vault = await resolveRemoteVault(paths, rest[0], PUBLISH_VIEW_USAGE);
+  if (!vault) return false;
+  const { config, provider } = resolveRemote(paths, vault, 'publish');
+  if (typeof provider.createViews !== 'function') {
+    throw new Error(`${provider.name} provider는 뷰 자동 생성을 지원하지 않습니다.`);
+  }
+
+  const client = await provider.createClient(
+    resolveRemoteToken(process.env, { prefix: provider.tokenPrefix, vaultName: vault.name, config, secretsPath: paths.secrets, provider: provider.name }),
+  );
+  const created = await provider.createViews(client, { databaseId: config.publish.databaseId });
+
+  const message = created.length
+    ? `뷰 생성 완료 · ${vault.name} → ${provider.name} · ${created.join(', ')}`
+    : `생성된 뷰가 없습니다 · ${vault.name}`;
+  if (stdin.isTTY) p.log.success(message);
+  else console.log(message);
   return true;
 }
 
@@ -1804,6 +1886,10 @@ export async function main(args) {
     if (action === 'remove') {
       if (stdin.isTTY) p.intro('llmwiki · 발행 설정 삭제');
       return publishRemove(paths, pubArgs);
+    }
+    if (action === 'view') {
+      if (stdin.isTTY) p.intro('llmwiki · 뷰 생성');
+      return publishView(paths, pubArgs);
     }
     if (stdin.isTTY) p.intro('llmwiki · 원격 발행');
     return publish(paths, rest);

@@ -112,7 +112,8 @@ secure 볼트로 쓰기가 해소되면:
 ## 원격 발행 — 위키 view publish (터미널 명령)
 
 - **`llmwiki publish [vault] [--dry-run] [--limit <n>]`** — 로컬 위키(`wiki/**`)를 원격 대상으로 **단방향(local→원격)** push해 view를 발행한다. diff를 떠 매핑에 없는 페이지는 생성, 콘텐츠 해시가 바뀐 페이지는 갱신하며, 원격→local이나 원격 페이지 삭제는 하지 않는다. 상태는 `_meta/remote-map.json`에 슬러그별 `remoteId`·`hash`로 기록한다. `--dry-run`은 토큰 없이 diff 요약만 낸다. 발행 설정은 전역 `publish.json` 엔트리로 관리하며(`llmwiki publish add`), 원격 대상은 그 엔트리의 `provider`로 결정한다(현재 Notion). 설정·토큰·보안은 `§ 보안 경계`의 원격 연동 규칙을 따른다.
-- **`llmwiki publish add [vault]` / `list` / `remove`** — 발행 설정을 관리하는 독립 명령군(`vault add`와 분리). `add`는 토큰·대상 DB를 받아 provider API로 검증한 뒤 전역 `publish.json`에 엔트리를, 토큰은 `secrets.json`에 저장한다. `list`는 등록된 설정을, `remove [--purge-token]`은 엔트리(선택적으로 토큰까지)를 지운다.
+- **`llmwiki publish add [vault]` / `list` / `remove`** — 발행 설정을 관리하는 독립 명령군(`vault add`와 분리). `add`는 토큰·대상 DB를 받아 provider API로 검증한 뒤 전역 `publish.json`에 엔트리를, 토큰은 `secrets.json`에 저장한다. `add`는 이미 저장/설정된 토큰(env·secrets store)이 있으면 재입력 없이 재사용한다. `list`는 등록된 설정을 보여준다. `remove`는 엔트리를 지우되, 그 볼트에 저장된 토큰은 재발급이 번거로우므로 자동으로 지우지 않고 삭제 여부를 물어본다(`--purge-token`/`--keep-token`으로 질문 없이 강제, 비대화형 환경은 토큰 유지). 공용 `provider:*` 토큰과 다른 볼트 토큰은 건드리지 않는다.
+- **뷰 탭 자동 생성** — 첫 `publish`에서 대상 DB에 뷰 탭(All/By Type/Gallery/Recent)을 자동 생성한다. `_meta/remote-map.json`의 `viewsCreated` 플래그로 idempotent하게 관리해 탭 중복을 막고, 생성 실패는 발행을 깨뜨리지 않는다(경고만). provider의 `createViews`에 위임하며 Notion은 Views API가 필요해 `@notionhq/client` 5.x에서만 동작한다. **`llmwiki publish view [vault]`** 는 이 뷰를 강제 재생성하는 명령이다(중복 방지 없음, 필요할 때만). 발행되는 각 행에는 `type`별 아이콘이 자동으로 붙는다.
 
 > `vault sync`(git backend)는 마크다운 원본 파일을 머신 간에 공유하고, `publish`(provider)는 위키 view를 Notion 등에 발행한다. 서로 다른 계층이다.
 

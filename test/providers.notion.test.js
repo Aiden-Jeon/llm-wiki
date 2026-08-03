@@ -2,15 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applySchema,
+  buildViewRequests,
   chunkBlocks,
   createDatabase,
   createRemotePage,
+  createViews,
   diffPublishSchema,
   extractDatabaseTitle,
   extractNotionTitle,
   fetchInboxNote,
   findTitleProperty,
   frontmatterToProperties,
+  iconForType,
   inspectDatabase,
   itemId,
   listDatabases,
@@ -91,30 +94,86 @@ test('chunkBlocks splits at the 100-block limit', () => {
   assert.deepEqual(chunkBlocks(blocks).map((c) => c.length), [100, 100, 50]);
 });
 
-test('createRemotePage builds properties + blocks and returns the new page id', async () => {
-  const calls = { create: 0, append: 0 };
-  const client = {
-    pages: { create: async (arg) => { calls.create += 1; assert.equal(arg.parent.database_id, 'db'); return { id: 'p1' }; } },
-    blocks: { children: { append: async () => { calls.append += 1; } } },
-  };
-  const id = await createRemotePage(client, { databaseId: 'db' }, { fields: { title: 'X' }, body: '# a' });
-  assert.equal(id, 'p1');
-  assert.equal(calls.create, 1);
+test('iconForType maps each wiki type to an emoji and falls back for unknown', () => {
+  assert.equal(iconForType('entity').emoji, '🏢');
+  assert.equal(iconForType('concept').emoji, '🧩');
+  assert.equal(iconForType('source').emoji, '📄');
+  assert.equal(iconForType('analysis').emoji, '🔍');
+  assert.equal(iconForType(undefined).emoji, '📝');
+  assert.equal(iconForType('mystery').emoji, '📝');
 });
 
-test('updateRemotePage replaces children and updates properties', async () => {
-  const calls = { update: 0, deleted: 0, append: 0 };
+test('createRemotePage builds properties + blocks + type icon and returns the new page id', async () => {
+  const calls = { create: 0, append: 0 };
+  let seenIcon;
   const client = {
-    pages: { update: async () => { calls.update += 1; } },
+    pages: { create: async (arg) => { calls.create += 1; assert.equal(arg.parent.database_id, 'db'); seenIcon = arg.icon; return { id: 'p1' }; } },
+    blocks: { children: { append: async () => { calls.append += 1; } } },
+  };
+  const id = await createRemotePage(client, { databaseId: 'db' }, { fields: { title: 'X', type: 'concept' }, body: '# a' });
+  assert.equal(id, 'p1');
+  assert.equal(calls.create, 1);
+  assert.equal(seenIcon.emoji, '🧩');
+});
+
+test('updateRemotePage replaces children and updates properties + icon', async () => {
+  const calls = { update: 0, deleted: 0, append: 0 };
+  let seenIcon;
+  const client = {
+    pages: { update: async (arg) => { calls.update += 1; seenIcon = arg.icon; } },
     blocks: {
       children: { list: async () => ({ results: [{ id: 'old' }] }), append: async () => { calls.append += 1; } },
       delete: async () => { calls.deleted += 1; },
     },
   };
-  await updateRemotePage(client, { databaseId: 'db' }, 'p1', { fields: { title: 'X' }, body: 'body' });
+  await updateRemotePage(client, { databaseId: 'db' }, 'p1', { fields: { title: 'X', type: 'entity' }, body: 'body' });
   assert.equal(calls.update, 1);
   assert.equal(calls.deleted, 1);
   assert.equal(calls.append, 1);
+  assert.equal(seenIcon.emoji, '🏢');
+});
+
+test('buildViewRequests creates 4 views; board uses property_id, sorts use property name', () => {
+  const requests = buildViewRequests({ dataSourceId: 'ds1', databaseId: 'db', propertyIds: { Type: 'tid' }, propertyNames: ['Type', 'Updated'] });
+  assert.deepEqual(requests.map((r) => r.name), ['All', 'By Type', 'Gallery', 'Recent']);
+  const board = requests.find((r) => r.name === 'By Type');
+  assert.equal(board.type, 'board');
+  assert.equal(board.configuration.group_by.property_id, 'tid');
+  const all = requests.find((r) => r.name === 'All');
+  assert.equal(all.sorts[0].property, 'Updated'); // Views API sorts는 이름을 쓴다
+  assert.equal(all.sorts[0].direction, 'descending');
+  // Views API는 data_source_id + database_id를 함께 요구한다.
+  for (const r of requests) { assert.equal(r.data_source_id, 'ds1'); assert.equal(r.database_id, 'db'); }
+});
+
+test('buildViewRequests skips the board view when Type property is missing, and requires ids', () => {
+  const requests = buildViewRequests({ dataSourceId: 'ds1', databaseId: 'db', propertyIds: {}, propertyNames: [] });
+  assert.deepEqual(requests.map((r) => r.name), ['All', 'Gallery', 'Recent']);
+  const all = requests.find((r) => r.name === 'All');
+  assert.equal(all.sorts, undefined); // Updated 없으면 정렬도 생략
+  assert.throws(() => buildViewRequests({}), /data_source_id/);
+  assert.throws(() => buildViewRequests({ dataSourceId: 'ds1' }), /database_id/);
+});
+
+test('createViews resolves data_source + property ids and creates each view', async () => {
+  const createdArgs = [];
+  const client = {
+    databases: { retrieve: async ({ database_id }) => { assert.equal(database_id, 'db'); return { id: 'db', data_sources: [{ id: 'ds1' }] }; } },
+    dataSources: { retrieve: async ({ data_source_id }) => { assert.equal(data_source_id, 'ds1'); return { properties: { Type: { id: 'tid' }, Updated: { id: 'uid' } } }; } },
+    views: { create: async (req) => { createdArgs.push(req); } },
+  };
+  const created = await createViews(client, { databaseId: 'db' });
+  assert.deepEqual(created, ['All', 'By Type', 'Gallery', 'Recent']);
+  assert.equal(createdArgs.length, 4);
+  assert.equal(createdArgs[1].configuration.group_by.property_id, 'tid');
+  assert.equal(createdArgs[0].data_source_id, 'ds1');
+  assert.equal(createdArgs[0].database_id, 'db');
+  assert.equal(createdArgs[0].sorts[0].property, 'Updated');
+});
+
+test('createViews errors when the SDK has no views endpoint (old @notionhq/client)', async () => {
+  const client = { databases: { retrieve: async () => ({ id: 'db', data_sources: [{ id: 'ds1' }] }) } };
+  await assert.rejects(() => createViews(client, { databaseId: 'db' }), /5\.x/);
 });
 
 test('listInboxItems paginates and itemId/extractNotionTitle read a page', async () => {
@@ -124,8 +183,10 @@ test('listInboxItems paginates and itemId/extractNotionTitle read a page', async
   ];
   let calls = 0;
   const client = {
-    databases: {
-      query: async ({ start_cursor }) => {
+    databases: { retrieve: async () => ({ id: 'db', data_sources: [{ id: 'ds1' }] }) },
+    dataSources: {
+      query: async ({ data_source_id, start_cursor }) => {
+        assert.equal(data_source_id, 'ds1');
         calls += 1;
         if (!start_cursor) return { results: [pages[0]], has_more: true, next_cursor: 'c2' };
         return { results: [pages[1]], has_more: false };
@@ -216,44 +277,70 @@ test('diffPublishSchema separates missing columns from type conflicts (title nam
   assert.deepEqual(diff.missing, ['Type', 'Summary', 'Confidence', 'Created', 'Updated', 'Source URL']);
 });
 
-test('listDatabases and listPages paginate the search API by object type', async () => {
+test('listDatabases finds data sources and resolves their parent database id', async () => {
   const client = {
     search: async ({ filter, start_cursor }) => {
-      if (filter.value === 'database') {
-        if (!start_cursor) return { results: [{ id: 'd1', title: [{ plain_text: 'Wiki' }] }], has_more: true, next_cursor: 'c2' };
-        return { results: [{ id: 'd2', title: [] }], has_more: false };
+      assert.equal(filter.value, 'data_source'); // API 2025-09-03: database가 아니라 data_source를 검색
+      if (!start_cursor) {
+        return {
+          results: [
+            { id: 'ds1', title: [{ plain_text: 'Wiki' }], database_parent: { type: 'database_id', database_id: 'd1' } },
+            { id: 'dsX', title: [{ plain_text: 'Wiki' }], database_parent: { type: 'database_id', database_id: 'd1' } }, // 같은 DB의 두 번째 data_source → 중복 제거
+          ],
+          has_more: true,
+          next_cursor: 'c2',
+        };
       }
-      return { results: [{ id: 'pg1', properties: { Name: { type: 'title', title: [{ plain_text: 'Home' }] } } }], has_more: false };
+      return { results: [{ id: 'ds2', title: [], database_parent: { type: 'database_id', database_id: 'd2' } }], has_more: false };
     },
   };
   assert.deepEqual(await listDatabases(client, {}), [{ id: 'd1', title: 'Wiki' }, { id: 'd2', title: '(제목 없음)' }]);
+});
+
+test('listPages paginates the search API by page object type', async () => {
+  const client = {
+    search: async ({ filter }) => {
+      assert.equal(filter.value, 'page');
+      return { results: [{ id: 'pg1', properties: { Name: { type: 'title', title: [{ plain_text: 'Home' }] } } }], has_more: false };
+    },
+  };
   assert.deepEqual(await listPages(client, {}), [{ id: 'pg1', title: 'Home' }]);
 });
 
-test('createDatabase creates the full schema under a parent page and returns the title property', async () => {
+test('createDatabase puts the full schema in initial_data_source and returns the title property', async () => {
   let created;
-  const client = { databases: { create: async (arg) => { created = arg; return { id: 'newdb', properties: { Name: { type: 'title' } } }; } } };
+  const client = {
+    databases: { create: async (arg) => { created = arg; return { id: 'newdb', data_sources: [{ id: 'ds1' }] }; } },
+    dataSources: { retrieve: async ({ data_source_id }) => { assert.equal(data_source_id, 'ds1'); return { properties: { Name: { type: 'title' } } }; } },
+  };
   const result = await createDatabase(client, { parentPageId: 'pg1', title: 'personal' });
   assert.equal(result.databaseId, 'newdb');
   assert.equal(result.titleProperty, 'Name');
   assert.equal(created.parent.page_id, 'pg1');
-  assert.deepEqual(Object.keys(created.properties).sort(), ['Confidence', 'Created', 'Name', 'Source URL', 'Status', 'Summary', 'Tags', 'Type', 'Updated']);
+  assert.deepEqual(Object.keys(created.initial_data_source.properties).sort(), ['Confidence', 'Created', 'Name', 'Source URL', 'Status', 'Summary', 'Tags', 'Type', 'Updated']);
   await assert.rejects(() => createDatabase(client, {}), /부모 페이지 id가 필요/);
 });
 
-test('inspectDatabase merges the retrieved title with the schema diff', async () => {
-  const client = { databases: { retrieve: async () => ({ title: [{ plain_text: 'Notes' }], properties: { Name: { type: 'title' } } }) } };
+test('inspectDatabase reads the data source schema and merges the title with the diff', async () => {
+  const client = {
+    databases: { retrieve: async () => ({ id: 'db', data_sources: [{ id: 'ds1' }] }) },
+    dataSources: { retrieve: async ({ data_source_id }) => { assert.equal(data_source_id, 'ds1'); return { title: [{ plain_text: 'Notes' }], properties: { Name: { type: 'title' } } }; } },
+  };
   const info = await inspectDatabase(client, { databaseId: 'db' });
   assert.equal(info.title, 'Notes');
   assert.equal(info.ok, false);
   assert.ok(info.missing.includes('Type'));
 });
 
-test('applySchema adds only the missing non-title properties', async () => {
+test('applySchema adds only the missing non-title properties to the data source', async () => {
   let updated;
-  const client = { databases: { update: async (arg) => { updated = arg; } } };
+  const client = {
+    databases: { retrieve: async () => ({ id: 'db', data_sources: [{ id: 'ds1' }] }) },
+    dataSources: { update: async (arg) => { updated = arg; } },
+  };
   const added = await applySchema(client, { databaseId: 'db', missing: ['Type', 'Summary'] });
   assert.deepEqual(added.sort(), ['Summary', 'Type']);
+  assert.equal(updated.data_source_id, 'ds1');
   assert.deepEqual(Object.keys(updated.properties).sort(), ['Summary', 'Type']);
   assert.deepEqual(await applySchema(client, { databaseId: 'db', missing: [] }), []);
 });

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  backfillFields,
   computeSyncDiff,
   contentHash,
   loadRemoteMap,
@@ -73,6 +74,31 @@ test('scanLocalPages reads only the given subdirs', () => {
   assert.deepEqual(pages.map((p) => p.slug), ['rag']);
 });
 
+test('backfillFields fills status/created/updated but never invents other fields', () => {
+  const filled = backfillFields({ title: 'x', type: 'concept' }, { gitDates: { created: '2024-05-01', updated: '2024-06-02' }, fallbackDate: '2026-01-01' });
+  assert.equal(filled.status, 'active');
+  assert.equal(filled.created, '2024-05-01');
+  assert.equal(filled.updated, '2024-06-02');
+  assert.equal(filled.tags, undefined);
+  assert.equal(filled.summary, undefined);
+});
+
+test('backfillFields falls back to file date when no git history, and keeps existing values', () => {
+  const filled = backfillFields({ title: 'x', type: 'concept', status: 'draft' }, { gitDates: null, fallbackDate: '2026-01-01' });
+  assert.equal(filled.status, 'draft'); // 기존 값 보존
+  assert.equal(filled.created, '2026-01-01');
+  assert.equal(filled.updated, '2026-01-01');
+});
+
+test('scanLocalPages backfills sparse frontmatter', () => {
+  const vault = tmpVault();
+  writePage(vault, 'wiki/concepts', 'sparse', { title: '머신 B', type: 'concept' });
+  const [page] = scanLocalPages(vault, ['wiki/concepts']);
+  assert.equal(page.fields.status, 'active');
+  assert.match(page.fields.created, /^\d{4}-\d{2}-\d{2}$/);
+  assert.match(page.fields.updated, /^\d{4}-\d{2}-\d{2}$/);
+});
+
 test('pushSync --dry-run reports the plan and writes nothing', async () => {
   const vault = tmpVault();
   writePage(vault, 'wiki/concepts', 'rag', BASE_FIELDS);
@@ -108,4 +134,34 @@ test('pushSync updates a changed page and rewrites the stored hash', async () =>
   assert.equal(summary.updated, 1);
   assert.equal(provider.calls.update, 1);
   assert.equal(loadRemoteMap(vault).pages.rag.hash, contentHash({ ...BASE_FIELDS }, 'v2 body'));
+});
+
+test('pushSync auto-creates views once on first publish, then skips on the next run', async () => {
+  const vault = tmpVault();
+  writePage(vault, 'wiki/concepts', 'rag', BASE_FIELDS);
+  const provider = stubProvider();
+  let viewCalls = 0;
+  provider.createViews = async () => { viewCalls += 1; return ['All', 'By Type', 'Gallery', 'Recent']; };
+
+  const first = await pushSync(vault, { provider, client: {}, ctx: { databaseId: 'db' }, subdirs: ['wiki/concepts'] });
+  assert.deepEqual(first.viewsCreated, ['All', 'By Type', 'Gallery', 'Recent']);
+  assert.equal(viewCalls, 1);
+  assert.match(loadRemoteMap(vault).viewsCreated, /^\d{4}-\d{2}-\d{2}$/);
+
+  // 두 번째 실행: 플래그가 있어 뷰를 다시 만들지 않는다(탭 중복 방지).
+  writePage(vault, 'wiki/concepts', 'rag', BASE_FIELDS, 'changed');
+  const second = await pushSync(vault, { provider, client: {}, ctx: { databaseId: 'db' }, subdirs: ['wiki/concepts'] });
+  assert.equal(second.viewsCreated, null);
+  assert.equal(viewCalls, 1);
+});
+
+test('pushSync keeps publishing even if view creation fails', async () => {
+  const vault = tmpVault();
+  writePage(vault, 'wiki/concepts', 'rag', BASE_FIELDS);
+  const provider = stubProvider();
+  provider.createViews = async () => { throw new Error('boom'); };
+  const summary = await pushSync(vault, { provider, client: {}, ctx: { databaseId: 'db' }, subdirs: ['wiki/concepts'] });
+  assert.equal(summary.created, 1); // 발행은 성공
+  assert.equal(summary.viewsError, 'boom');
+  assert.equal(loadRemoteMap(vault).viewsCreated, undefined); // 실패 시 플래그 안 세움 → 다음에 재시도
 });
