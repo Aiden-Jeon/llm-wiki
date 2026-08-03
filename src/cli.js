@@ -36,9 +36,18 @@ import {
 import { loadRemoteConfig, upsertRemoteConfig, removeRemoteConfig, listRemoteConfigs, DEFAULT_PROVIDER } from './remote.js';
 import { renderNote } from './note.js';
 import { getProvider, listProviders } from './providers/index.js';
-import { resolveRemoteToken } from './providers/token.js';
-import { setSecret, deleteSecret, hasSecret } from './secrets.js';
-import { pushSync } from './sync.js';
+import { resolveRemoteToken, normalizeVaultKey } from './providers/token.js';
+import {
+  addConnection,
+  listConnections,
+  getConnection,
+  getConnectionToken,
+  removeConnection,
+  hasConnection,
+  normalizeConnectionName,
+  legacyConnectionName,
+} from './secrets.js';
+import { pushSync, deleteRemoteDatabaseMapping } from './sync.js';
 import { pullInbox } from './inbox.js';
 import {
   gitAddCommit,
@@ -59,10 +68,13 @@ const VAULT_ADD_USAGE = 'llmwiki vault add --name <name> [--path <path>] [--kind
 const VAULT_SYNC_USAGE = 'llmwiki vault sync [name] [--message <msg>] [--no-push] [--pull-only]';
 const CAPTURE_USAGE = 'llmwiki capture [--vault <name>] [--title <제목>] [--text <내용>]';
 const PUBLISH_USAGE = 'llmwiki publish [vault] [--dry-run] [--limit <n>]';
-const PUBLISH_ADD_USAGE = 'llmwiki publish add [vault] [--remote <provider>] [--remote-token <token>] [--publish-db <id>] [--inbox-db <id>] [--title-prop <name>] [--allow-publish]';
-const PUBLISH_REMOVE_USAGE = 'llmwiki publish remove [vault] [--keep-token | --purge-token]';
+const PUBLISH_ADD_USAGE = 'llmwiki publish add [vault] [--remote <provider>] [--connection <name>] [--remote-token <token>] [--publish-db <id>] [--inbox-db <id>] [--title-prop <name>] [--allow-publish]';
+const PUBLISH_REMOVE_USAGE = 'llmwiki publish remove [vault] [--purge-token | --keep-token]';
 const PUBLISH_LIST_USAGE = 'llmwiki publish list [--json]';
 const PUBLISH_VIEW_USAGE = 'llmwiki publish view [vault]';
+const CONNECTION_ADD_USAGE = 'llmwiki connection add [--remote <provider>] [--name <name>] [--remote-token <token>]';
+const CONNECTION_LIST_USAGE = 'llmwiki connection list [--json]';
+const CONNECTION_REMOVE_USAGE = 'llmwiki connection remove <name> [--remote <provider>] [--force]';
 const CONFIG_EXPORT_USAGE = 'llmwiki config export [--output <file>]';
 const CONFIG_IMPORT_USAGE = 'llmwiki config import <file> [--vaults-dir <dir>] [--force]';
 const INBOX_USAGE = 'llmwiki inbox pull [vault] [--dry-run] [--limit <n>]';
@@ -81,7 +93,10 @@ const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운영합�
   llmwiki publish [vault] [--dry-run] [--limit <n>]   로컬 위키를 원격에 발행 (view, 단방향)
   llmwiki publish add [vault] [options]  볼트에 원격 provider를 연결 (발행 설정)
   llmwiki publish list [--json]   등록된 발행 설정 목록
-  llmwiki publish remove [vault]  발행 설정 삭제(저장된 토큰은 물어본 뒤 삭제)
+  llmwiki publish remove [vault]  발행 설정 삭제(고아가 된 연결이면 토큰 삭제 여부를 물어봄)
+  llmwiki connection add [options]  원격 provider 토큰을 이름 붙여 저장 (워크스페이스별 연결)
+  llmwiki connection list [--json]  저장된 연결 목록
+  llmwiki connection remove <name>  저장된 연결(토큰) 삭제
   llmwiki inbox pull [vault] [--dry-run] [--limit <n>]  원격 inbox의 새 항목을 가져옴
   llmwiki setup                   초기 설정 및 볼트 등록
   llmwiki vault add [options]     볼트 추가/수정
@@ -443,9 +458,105 @@ async function addVault(paths, args, { outro = true, initial = {}, edit = false 
   return true;
 }
 
+// TTY에서 새 토큰을 입력받는다(provider가 발급 안내를 주면 먼저 보여준다). 취소 시 null.
+async function promptNewToken(provider) {
+  if (provider.tokenHelp) {
+    const help = provider.tokenHelp;
+    // p.note는 CJK·긴 URL에서 테두리가 틀어지므로 displayWidth 기반 renderNote로 그린다.
+    const body = [help.url && `토큰 발급: ${help.url}`, ...(help.lines || [])].filter(Boolean).join('\n');
+    if (body) console.log(renderNote(body, `${provider.name} 토큰 발급 안내`));
+  }
+  const entered = await p.password({ message: `${provider.name} 토큰`, mask: '•' });
+  if (cancelPrompt(entered)) return null;
+  return entered;
+}
+
+// TTY에서 연결 이름을 입력받는다. 기존 이름이면 덮어쓸지 확인한다. 취소 시 null.
+async function promptConnectionName(paths, provider, { suggested } = {}) {
+  while (true) {
+    const entered = await p.text({
+      message: `연결 이름 (이 ${provider.name} 워크스페이스를 부를 이름)`,
+      defaultValue: suggested || '',
+      placeholder: suggested || 'personal',
+    });
+    if (cancelPrompt(entered)) return null;
+    let name;
+    try { name = normalizeConnectionName(entered); }
+    catch (error) { p.log.warn(error.message); continue; }
+    if (hasConnection(paths.secrets, provider.name, name)) {
+      const overwrite = await p.confirm({ message: `연결 '${name}'이(가) 이미 있습니다. 토큰을 덮어쓸까요?`, initialValue: false });
+      if (cancelPrompt(overwrite)) return null;
+      if (!overwrite) continue;
+    }
+    return name;
+  }
+}
+
 /**
- * 볼트에 원격 provider를 연결한다. 토큰·DB id를 받아 실호출로 검증한 뒤,
- * 성공해야만 토큰을 secrets store에 저장하고 전역 publish.json에 대상 설정을 기록한다.
+ * configureRemote가 쓸 연결(named connection)을 정한다. 반환 { name, token, isNew } | null(취소).
+ * 우선순위:
+ *  - `--connection <name>`: 그 이름 사용. `--remote-token` 있으면 새 토큰(isNew), 없으면 저장된
+ *    연결 재사용(없고 TTY면 토큰 입력받고, 없고 비-TTY면 에러).
+ *  - `--remote-token`만: 이름이 필요 → 비-TTY는 `--connection` 필수(에러), TTY는 이름 입력.
+ *  - 둘 다 없음 → TTY는 저장된 연결 목록에서 고르거나 새로 추가, 비-TTY는 볼트 이름 기반
+ *    레거시 연결이 있으면 재사용(마이그레이션 호환), 없으면 에러.
+ */
+async function resolveConfigureConnection(paths, provider, vault, opts, tty) {
+  const explicitName = opts.connection ? normalizeConnectionName(opts.connection) : null;
+  const explicitToken = opts['remote-token'];
+
+  if (explicitName) {
+    if (explicitToken) return { name: explicitName, token: explicitToken, isNew: true };
+    const stored = getConnectionToken(paths.secrets, provider.name, explicitName);
+    if (stored) return { name: explicitName, token: stored, isNew: false };
+    if (!tty) throw new Error(`연결 '${explicitName}'을(를) 찾을 수 없습니다. --remote-token으로 새로 저장하세요.\n사용법: ${PUBLISH_ADD_USAGE}`);
+    const token = await promptNewToken(provider);
+    if (token === null) return null;
+    return { name: explicitName, token, isNew: true };
+  }
+
+  if (explicitToken) {
+    // 비-TTY에서 이름이 없으면 볼트 이름을 연결 이름으로 기본 지정한다(스크립트 호환).
+    if (!tty) return { name: normalizeConnectionName(vault.name), token: explicitToken, isNew: true };
+    const name = await promptConnectionName(paths, provider, { suggested: vault.name });
+    if (name === null) return null;
+    return { name, token: explicitToken, isNew: true };
+  }
+
+  if (!tty) {
+    // 볼트 이름 기반 레거시 연결(v1 마이그레이션 결과)이 있으면 그대로 쓴다.
+    const legacy = legacyConnectionName(normalizeVaultKey(vault.name));
+    const token = getConnectionToken(paths.secrets, provider.name, legacy);
+    if (token) return { name: legacy, token, isNew: false };
+    throw new Error(`--remote 사용 시 저장된 연결이 없으면 --remote-token(과 --connection)이 필요합니다.\n사용법: ${PUBLISH_ADD_USAGE}`);
+  }
+
+  // TTY: 저장된 연결에서 고르거나 새로 추가한다.
+  const existing = listConnections(paths.secrets, provider.name);
+  if (existing.length) {
+    const picked = await p.select({
+      message: `${provider.name} 연결 선택`,
+      options: [
+        ...existing.map((c) => ({ value: c.name, label: c.name, hint: c.account })),
+        { value: '__new__', label: '+ 새 연결 추가' },
+      ],
+    });
+    if (cancelPrompt(picked)) return null;
+    if (picked !== '__new__') {
+      return { name: picked, token: getConnectionToken(paths.secrets, provider.name, picked), isNew: false };
+    }
+  }
+  const name = await promptConnectionName(paths, provider, { suggested: vault.name });
+  if (name === null) return null;
+  const token = await promptNewToken(provider);
+  if (token === null) return null;
+  return { name, token, isNew: true };
+}
+
+/**
+ * 볼트에 원격 provider를 연결한다. named connection(토큰)과 DB id를 받아 실호출로 검증한 뒤,
+ * 성공해야만 (새 연결이면) 토큰을 secrets store에 저장하고 전역 publish.json에 대상 설정과
+ * 연결 이름을 기록한다. 같은 연결을 여러 볼트가 공유할 수 있다.
  * getProvider는 테스트 주입 seam이다. 비-TTY에서는 --remote가 있어야만 동작한다.
  */
 export async function configureRemote(paths, vault, opts = {}, { getProvider: resolveProvider = getProvider } = {}) {
@@ -473,48 +584,28 @@ export async function configureRemote(paths, vault, opts = {}, { getProvider: re
     return false;
   }
 
-  // 토큰: 플래그 우선. 없으면 이미 저장/설정된 토큰(env·secrets store)을 조용히 찾아 재사용하고,
-  // 그래도 없을 때만 TTY에서 새로 입력받는다.
-  let token = opts['remote-token'];
-  if (!token) {
-    let existing;
-    try {
-      existing = resolveRemoteToken(process.env, {
-        prefix: provider.tokenPrefix, vaultName: vault.name, secretsPath: paths.secrets, provider: provider.name,
-      });
-    } catch { existing = undefined; } // 저장된 토큰이 없으면 새로 입력받는다.
-
-    if (existing) {
-      token = existing;
-      if (tty) p.log.info(`저장된 ${provider.name} 토큰을 재사용합니다.`);
-    } else {
-      if (!tty) throw new Error(`--remote 사용 시 --remote-token이 필요합니다.\n사용법: ${PUBLISH_ADD_USAGE}`);
-      // provider가 발급 안내를 제공하면 토큰 입력 전에 보여준다(어디서 받는지 막막하지 않게).
-      // p.note는 CJK·긴 URL에서 테두리가 틀어지므로 displayWidth 기반 renderNote로 그린다.
-      if (provider.tokenHelp) {
-        const help = provider.tokenHelp;
-        const body = [help.url && `토큰 발급: ${help.url}`, ...(help.lines || [])].filter(Boolean).join('\n');
-        if (body) console.log(renderNote(body, `${provider.name} 토큰 발급 안내`));
-      }
-      const entered = await p.password({ message: `${provider.name} 토큰`, mask: '•' });
-      if (cancelPrompt(entered)) return false;
-      token = entered;
-    }
-  }
+  // 사용할 named connection(토큰)을 정한다: 저장된 연결 재사용 또는 새 토큰 입력.
+  const conn = await resolveConfigureConnection(paths, provider, vault, opts, tty);
+  if (!conn) return false;
+  const { name: connectionName, token } = conn;
 
   // 클라이언트 생성 + 토큰 검증을 먼저 한다(대화형 대상 선택이 client를 쓴다).
   // 실패하면 아무것도 저장하지 않는다.
   let client;
+  let account;
   const spinTok = tty ? p.spinner() : null;
   if (spinTok) spinTok.start('토큰 검증 중');
   try {
     client = await provider.createClient(token);
-    if (typeof provider.validateToken === 'function') await provider.validateToken(client);
+    if (typeof provider.validateToken === 'function') {
+      const result = await provider.validateToken(client);
+      account = result && result.account;
+    }
   } catch (error) {
     if (spinTok) spinTok.stop('검증 실패');
     throw error;
   }
-  if (spinTok) spinTok.stop('토큰 확인 완료');
+  if (spinTok) spinTok.stop(account ? `토큰 확인 완료 · ${account}` : '토큰 확인 완료');
 
   // 대상 해소: TTY이고 provider가 목록/생성을 지원하면 대화형(새로 생성/기존 선택/건너뛰기),
   // 아니면 플래그(--publish-db/--inbox-db)로 받고 verifyDatabase로 존재만 확인한다.
@@ -577,9 +668,10 @@ export async function configureRemote(paths, vault, opts = {}, { getProvider: re
     if (inboxDb) await provider.verifyDatabase(client, { databaseId: inboxDb });
   }
 
-  // 통과 → 토큰은 store에만, 대상 설정은 전역 publish.json에(토큰 없이) 기록한다.
-  setSecret(paths.secrets, provider.name, vault.name, token);
-  const patch = { provider: provider.name };
+  // 통과 → 토큰은 named connection으로 store에만(새 토큰일 때만), 대상 설정은 전역
+  // publish.json에(토큰 없이) 기록하고 어떤 연결을 쓰는지 연결 이름을 남긴다.
+  if (conn.isNew) addConnection(paths.secrets, provider.name, connectionName, { token, account });
+  const patch = { provider: provider.name, connection: connectionName };
   if (publishDb) {
     patch.publish = { databaseId: publishDb };
     const titleProp = opts['title-prop'] || publishTitleProp;
@@ -589,7 +681,8 @@ export async function configureRemote(paths, vault, opts = {}, { getProvider: re
   if (inboxDb) patch.inbox = { databaseId: inboxDb };
   upsertRemoteConfig(paths.publish, vault.name, patch);
 
-  const summary = `발행 설정 · ${vault.name} → ${provider.name}${publishDb ? ' · publish' : ''}${inboxDb ? ' · inbox' : ''} · 토큰 저장됨(secrets.json)`;
+  const tokenNote = conn.isNew ? `연결 '${connectionName}' 저장됨(secrets.json)` : `연결 '${connectionName}' 사용`;
+  const summary = `발행 설정 · ${vault.name} → ${provider.name}${publishDb ? ' · publish' : ''}${inboxDb ? ' · inbox' : ''} · ${tokenNote}`;
   if (tty) p.log.success(summary); else console.log(summary);
   return true;
 }
@@ -683,7 +776,7 @@ async function selectRemoteDatabase(provider, client, { label, checkSchema, defa
  */
 async function publishAdd(paths, args) {
   const { options, rest } = parseOptions(args, {
-    allowed: ['remote', 'remote-token', 'publish-db', 'inbox-db', 'title-prop', 'allow-publish'],
+    allowed: ['remote', 'connection', 'remote-token', 'publish-db', 'inbox-db', 'title-prop', 'allow-publish'],
     booleans: ['allow-publish'],
     usage: PUBLISH_ADD_USAGE,
   });
@@ -712,6 +805,7 @@ function publishList(paths, args) {
   for (const name of names) {
     const c = configs[name];
     const parts = [];
+    if (c.connection) parts.push(`연결=${c.connection}`);
     if (c.publish && c.publish.databaseId) parts.push(`publish=${c.publish.databaseId}`);
     if (c.inbox && c.inbox.databaseId) parts.push(`inbox=${c.inbox.databaseId}`);
     if (c.allowPublish) parts.push('allowPublish');
@@ -722,19 +816,20 @@ function publishList(paths, args) {
 
 /**
  * `llmwiki publish remove [vault]`: 발행 설정 엔트리를 지운다.
- * 볼트별로 저장된 provider 토큰(secretKey `provider:<VAULT>`)은 재발급이 번거로우므로 자동으로
- * 지우지 않고 사용자에게 삭제 여부를 물어본다(공용 `provider:*` 토큰과 다른 볼트 토큰은 건드리지 않는다).
- * `--purge-token`/`--keep-token`으로 질문 없이 강제할 수 있고, 비대화형 환경은 기본적으로 토큰을 유지한다.
+ * 토큰은 이 볼트가 아니라 named connection에 묶여 여러 볼트가 공유할 수 있으므로 자동으로는
+ * 건드리지 않는다(설정만 unlink). 다만 이 볼트를 지운 뒤 그 연결을 쓰는 볼트가 하나도 남지
+ * 않으면(고아 연결), TTY에서 토큰도 지울지 물어본다(`--purge-token`으로 질문 없이 강제,
+ * `--keep-token`으로 유지). 다른 볼트가 아직 쓰는 공유 연결은 절대 지우지 않는다.
  */
 export async function publishRemove(paths, args) {
   const { options, rest } = parseOptions(args, {
-    allowed: ['keep-token', 'purge-token'],
-    booleans: ['keep-token', 'purge-token'],
+    allowed: ['purge-token', 'keep-token'],
+    booleans: ['purge-token', 'keep-token'],
     usage: PUBLISH_REMOVE_USAGE,
   });
   if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${PUBLISH_REMOVE_USAGE}`);
-  if (options['keep-token'] && options['purge-token']) {
-    throw new Error('--keep-token과 --purge-token은 함께 쓸 수 없습니다.');
+  if (options['purge-token'] && options['keep-token']) {
+    throw new Error('--purge-token과 --keep-token은 함께 쓸 수 없습니다.');
   }
   const tty = Boolean(stdin.isTTY);
   const vault = await resolveRemoteVault(paths, rest[0], PUBLISH_REMOVE_USAGE);
@@ -746,41 +841,194 @@ export async function publishRemove(paths, args) {
     return false;
   }
 
+  // 삭제 전에 이 볼트가 쓰던 provider·연결을 기억해 둔다(고아 판정에 쓴다).
   const provider = config.provider || DEFAULT_PROVIDER;
-  // 볼트별로 저장된 provider 토큰이 있을 때만 삭제 여부를 결정한다. 공용 provider:* 토큰은
-  // 다른 볼트도 쓸 수 있으므로 건드리지 않는다.
-  const tokenStored = hasSecret(paths.secrets, provider, vault.name);
-  let deleteToken;
-  if (!tokenStored) {
-    deleteToken = false;
-  } else if (options['purge-token']) {
-    deleteToken = true;
-  } else if (options['keep-token']) {
-    deleteToken = false;
-  } else if (tty) {
-    // 토큰은 재발급이 번거로우므로 사용자에게 물어보고, 명시적 동의가 있을 때만 지운다.
-    const answer = await p.confirm({
-      message: `${vault.name} 볼트에 저장된 ${provider} 토큰도 삭제할까요?`,
-      initialValue: false,
-    });
-    if (cancelPrompt(answer)) return false;
-    deleteToken = answer;
-  } else {
-    // 비대화형(스크립트) 환경에서는 물어볼 수 없으므로 토큰을 보존한다.
-    // 삭제하려면 --purge-token을 명시한다.
-    deleteToken = false;
-  }
+  const connection = config.connection;
+  // 발행 설정을 제거하기 전에 DB id를 추출해 remote-map에서 해당 DB 항목도 지운다.
+  const publishDbId = config.publish && config.publish.databaseId;
 
   const removed = removeRemoteConfig(paths.publish, vault.name);
-  const tokenRemoved = deleteToken && deleteSecret(paths.secrets, provider, vault.name);
 
-  let summary = `발행 설정 삭제 · ${vault.name}`;
-  if (tokenRemoved) summary += ' · 토큰 삭제됨';
-  else if (tokenStored) summary += ' · 토큰 유지됨';
-  if (tty) p.log.success(summary); else console.log(summary);
-  if (!tty && tokenStored && !deleteToken) {
-    console.log(`저장된 ${provider} 토큰은 유지됩니다. 삭제하려면 --purge-token을 사용하세요.`);
+  // remote-map에서 해당 DB의 매핑을 제거한다(파일이 없으면 무시).
+  if (publishDbId && fs.existsSync(vault.path)) {
+    deleteRemoteDatabaseMapping(vault.path, publishDbId);
   }
+
+  const summary = `발행 설정 삭제 · ${vault.name}`;
+  if (tty) p.log.success(summary); else console.log(summary);
+
+  // 이 볼트를 지운 뒤 그 연결을 쓰는 볼트가 하나도 없고, 토큰이 실제로 저장돼 있으면
+  // 고아 연결이다 — 정리할지 처리한다(공유 연결은 여기 걸리지 않아 안전).
+  if (connection && hasConnection(paths.secrets, provider, connection)) {
+    const stillUsed = (connectionUsage(paths).get(`${provider}:${connection}`) || []).length > 0;
+    if (!stillUsed) {
+      let purge;
+      if (options['purge-token']) purge = true;
+      else if (options['keep-token']) purge = false;
+      else if (tty) {
+        const ok = await p.confirm({
+          message: `연결 '${provider}:${connection}'을(를) 이제 아무 볼트도 쓰지 않습니다. 저장된 토큰도 지울까요?`,
+          initialValue: false,
+        });
+        if (cancelPrompt(ok)) return removed;
+        purge = ok === true;
+      } else {
+        // 비대화형은 물어볼 수 없으므로 토큰을 유지하고 안내만 한다.
+        console.log(`연결 '${provider}:${connection}'이(가) 더 이상 쓰이지 않습니다. 지우려면 llmwiki connection remove ${connection} --remote ${provider}`);
+        purge = false;
+      }
+      if (purge && removeConnection(paths.secrets, provider, connection)) {
+        const note = `연결 삭제됨 · ${provider}:${connection}`;
+        if (tty) p.log.success(note); else console.log(note);
+      }
+    }
+  }
+  return removed;
+}
+
+// connection add/list/remove가 공유하는 provider 해소: --remote 우선, 없으면 TTY 선택, 비-TTY는 기본값.
+async function resolveConnectionProvider(opts, tty, resolveProvider = getProvider) {
+  if (opts.remote) return resolveProvider(opts.remote);
+  const names = listProviders();
+  if (!tty || names.length === 1) return resolveProvider(names[0] || DEFAULT_PROVIDER);
+  const picked = await p.select({ message: '원격 provider', options: names.map((n) => ({ value: n, label: n })) });
+  if (cancelPrompt(picked)) return null;
+  return resolveProvider(picked);
+}
+
+/**
+ * `llmwiki connection add`: 원격 provider 토큰을 이름 붙여 저장한다(워크스페이스별 연결).
+ * 토큰을 실호출로 검증한 뒤에만 저장하고, 검증에서 얻은 account를 함께 기록한다.
+ */
+export async function connectionAdd(paths, args, { getProvider: resolveProvider = getProvider } = {}) {
+  const { options } = parseOptions(args, {
+    allowed: ['remote', 'name', 'remote-token'],
+    usage: CONNECTION_ADD_USAGE,
+  });
+  const tty = Boolean(stdin.isTTY);
+  const provider = await resolveConnectionProvider(options, tty, resolveProvider);
+  if (!provider) return false;
+
+  // 이름: 플래그 우선. 없으면 TTY에서 입력(중복 시 덮어쓸지 확인), 비-TTY는 필수.
+  let name = options.name ? normalizeConnectionName(options.name) : null;
+  if (!name) {
+    if (!tty) throw new Error(`--name이 필요합니다.\n사용법: ${CONNECTION_ADD_USAGE}`);
+    name = await promptConnectionName(paths, provider, {});
+    if (name === null) return false;
+  } else if (tty && hasConnection(paths.secrets, provider.name, name)) {
+    const overwrite = await p.confirm({ message: `연결 '${name}'이(가) 이미 있습니다. 토큰을 덮어쓸까요?`, initialValue: false });
+    if (cancelPrompt(overwrite) || !overwrite) return false;
+  }
+
+  // 토큰: 플래그 우선. 없으면 TTY에서 입력, 비-TTY는 필수.
+  let token = options['remote-token'];
+  if (!token) {
+    if (!tty) throw new Error(`--remote-token이 필요합니다.\n사용법: ${CONNECTION_ADD_USAGE}`);
+    token = await promptNewToken(provider);
+    if (token === null) return false;
+  }
+
+  // 검증 후에만 저장한다.
+  let account;
+  const spin = tty ? p.spinner() : null;
+  if (spin) spin.start('토큰 검증 중');
+  try {
+    const client = await provider.createClient(token);
+    if (typeof provider.validateToken === 'function') {
+      const result = await provider.validateToken(client);
+      account = result && result.account;
+    }
+  } catch (error) {
+    if (spin) spin.stop('검증 실패');
+    throw error;
+  }
+  if (spin) spin.stop(account ? `토큰 확인 완료 · ${account}` : '토큰 확인 완료');
+
+  addConnection(paths.secrets, provider.name, name, { token, account });
+  const summary = `연결 저장됨 · ${provider.name}:${name}${account ? ` · ${account}` : ''}`;
+  if (tty) p.log.success(summary); else console.log(summary);
+  return true;
+}
+
+/** `llmwiki connection list [--json]`: 저장된 연결을 나열한다(토큰은 절대 출력하지 않는다). */
+export function connectionList(paths, args) {
+  const { options } = parseOptions(args, { allowed: ['json'], booleans: ['json'], usage: CONNECTION_LIST_USAGE });
+  const connections = listConnections(paths.secrets);
+  if (options.json === true) {
+    // 토큰은 빼고 메타데이터만 노출한다.
+    console.log(JSON.stringify(connections.map(({ provider, name, account, updatedAt }) => ({ provider, name, account, updatedAt })), null, 2));
+    return true;
+  }
+  if (!connections.length) {
+    console.log('저장된 연결이 없습니다. `llmwiki connection add`로 추가하세요.');
+    return true;
+  }
+  // 어떤 볼트가 각 연결을 쓰는지도 함께 보여준다.
+  const usage = connectionUsage(paths);
+  for (const c of connections) {
+    const users = usage.get(`${c.provider}:${c.name}`) || [];
+    const parts = [c.account, users.length ? `볼트: ${users.join(', ')}` : null].filter(Boolean);
+    console.log(`${c.provider}:${c.name}${parts.length ? ` · ${parts.join(' · ')}` : ''}`);
+  }
+  return true;
+}
+
+/** provider:connection → 그 연결을 참조하는 볼트 이름 목록. */
+function connectionUsage(paths) {
+  const map = new Map();
+  const configs = listRemoteConfigs(paths.publish);
+  for (const [vaultName, c] of Object.entries(configs)) {
+    const provider = c.provider || DEFAULT_PROVIDER;
+    const connection = c.connection || legacyConnectionName(normalizeVaultKey(vaultName));
+    const key = `${provider}:${connection}`;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(vaultName);
+  }
+  return map;
+}
+
+/**
+ * `llmwiki connection remove <name>`: 저장된 연결(토큰)을 삭제한다.
+ * 이 연결을 참조하는 볼트가 있으면 경고하고, TTY에서는 정말 지울지 확인한다
+ * (비-TTY는 --force 없이는 거부한다). 토큰은 재발급이 번거로우므로 물어본 뒤 지운다.
+ */
+export async function connectionRemove(paths, args, { getProvider: resolveProvider = getProvider } = {}) {
+  const { options, rest } = parseOptions(args, {
+    allowed: ['remote', 'force'],
+    booleans: ['force'],
+    usage: CONNECTION_REMOVE_USAGE,
+  });
+  if (!rest.length) throw new Error(`삭제할 연결 이름이 필요합니다.\n사용법: ${CONNECTION_REMOVE_USAGE}`);
+  if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${CONNECTION_REMOVE_USAGE}`);
+  const tty = Boolean(stdin.isTTY);
+  const provider = await resolveConnectionProvider(options, tty, resolveProvider);
+  if (!provider) return false;
+  const name = normalizeConnectionName(rest[0]);
+
+  const entry = getConnection(paths.secrets, provider.name, name);
+  if (!entry) {
+    const note = `연결 '${provider.name}:${name}'을(를) 찾을 수 없습니다.`;
+    if (tty) p.log.warn(note); else console.error(note);
+    return false;
+  }
+
+  // 이 연결을 쓰는 볼트가 있으면 알린다(설정은 남지만 토큰이 사라져 발행이 막힌다).
+  const users = connectionUsage(paths).get(`${provider.name}:${name}`) || [];
+  if (users.length) {
+    const warn = `이 연결을 쓰는 볼트: ${users.join(', ')} — 삭제하면 해당 볼트의 발행/수집이 토큰을 잃습니다.`;
+    if (tty) p.log.warn(warn); else console.error(warn);
+  }
+
+  if (tty) {
+    const ok = await p.confirm({ message: `연결 '${provider.name}:${name}'의 토큰을 삭제할까요?`, initialValue: false });
+    if (cancelPrompt(ok) || !ok) return false;
+  } else if (!options.force) {
+    throw new Error(`비대화형 환경에서 연결을 삭제하려면 --force가 필요합니다.\n사용법: ${CONNECTION_REMOVE_USAGE}`);
+  }
+
+  const removed = removeConnection(paths.secrets, provider.name, name);
+  const summary = `연결 삭제됨 · ${provider.name}:${name}`;
+  if (tty) p.log.success(summary); else console.log(summary);
   return removed;
 }
 
@@ -1893,6 +2141,19 @@ export async function main(args) {
     }
     if (stdin.isTTY) p.intro('llmwiki · 원격 발행');
     return publish(paths, rest);
+  }
+  if (command === 'connection' || command === 'connections') {
+    const [action = 'list', ...connArgs] = rest;
+    if (action === 'add') {
+      if (stdin.isTTY) p.intro('llmwiki · 연결 추가');
+      return connectionAdd(paths, connArgs);
+    }
+    if (action === 'list' || action === 'ls') return connectionList(paths, connArgs);
+    if (action === 'remove' || action === 'rm') {
+      if (stdin.isTTY) p.intro('llmwiki · 연결 삭제');
+      return connectionRemove(paths, connArgs);
+    }
+    throw new Error('사용법: llmwiki connection <add|list|remove>');
   }
   if (command === 'inbox') {
     const [action, ...inboxArgs] = rest;

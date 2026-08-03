@@ -155,20 +155,49 @@ test('buildViewRequests skips the board view when Type property is missing, and 
   assert.throws(() => buildViewRequests({ dataSourceId: 'ds1' }), /database_id/);
 });
 
-test('createViews resolves data_source + property ids and creates each view', async () => {
-  const createdArgs = [];
+// createViews 테스트용 fake client 팩토리. 초기 뷰 목록(existingViews)을 받는다.
+function viewsClient(existingViews = []) {
+  const calls = { create: [], update: [] };
+  const store = existingViews.map((v) => ({ ...v }));
   const client = {
-    databases: { retrieve: async ({ database_id }) => { assert.equal(database_id, 'db'); return { id: 'db', data_sources: [{ id: 'ds1' }] }; } },
-    dataSources: { retrieve: async ({ data_source_id }) => { assert.equal(data_source_id, 'ds1'); return { properties: { Type: { id: 'tid' }, Updated: { id: 'uid' } } }; } },
-    views: { create: async (req) => { createdArgs.push(req); } },
+    databases: { retrieve: async () => ({ id: 'db', data_sources: [{ id: 'ds1' }] }) },
+    dataSources: { retrieve: async () => ({ properties: { Type: { id: 'tid' }, Updated: { id: 'uid' } } }) },
+    views: {
+      create: async (req) => { calls.create.push(req); },
+      list: async () => ({ results: store.map((v) => ({ id: v.id })), has_more: false }),
+      retrieve: async ({ view_id }) => store.find((v) => v.id === view_id),
+      update: async (req) => { calls.update.push(req); },
+    },
   };
-  const created = await createViews(client, { databaseId: 'db' });
-  assert.deepEqual(created, ['All', 'By Type', 'Gallery', 'Recent']);
-  assert.equal(createdArgs.length, 4);
-  assert.equal(createdArgs[1].configuration.group_by.property_id, 'tid');
-  assert.equal(createdArgs[0].data_source_id, 'ds1');
-  assert.equal(createdArgs[0].database_id, 'db');
-  assert.equal(createdArgs[0].sorts[0].property, 'Updated');
+  return { client, calls };
+}
+
+test('createViews absorbs the default table view into All and creates the other three', async () => {
+  // 새 DB엔 Notion이 기본 Table 뷰('Default view')를 하나 준다.
+  const { client, calls } = viewsClient([{ id: 'def', name: 'Default view', type: 'table' }]);
+  const touched = await createViews(client, { databaseId: 'db' });
+  assert.deepEqual(touched, ['All', 'By Type', 'Gallery', 'Recent']);
+  // All은 기본 뷰를 update로 흡수(중복 방지), 나머지 3개는 create.
+  assert.deepEqual(calls.update.map((r) => r.view_id), ['def']);
+  assert.deepEqual(calls.create.map((r) => r.name), ['By Type', 'Gallery', 'Recent']);
+  // update 바디엔 type·부모 id가 없고 name·sorts만 있다.
+  assert.equal(calls.update[0].name, 'All');
+  assert.equal(calls.update[0].type, undefined);
+  assert.equal(calls.update[0].sorts[0].property, 'Updated');
+  assert.equal(calls.create[0].configuration.group_by.property_id, 'tid');
+});
+
+test('createViews is idempotent: re-running updates all four and creates none', async () => {
+  const { client, calls } = viewsClient([
+    { id: 'v1', name: 'All', type: 'table' },
+    { id: 'v2', name: 'By Type', type: 'board' },
+    { id: 'v3', name: 'Gallery', type: 'gallery' },
+    { id: 'v4', name: 'Recent', type: 'list' },
+  ]);
+  const touched = await createViews(client, { databaseId: 'db' });
+  assert.deepEqual(touched, ['All', 'By Type', 'Gallery', 'Recent']);
+  assert.equal(calls.create.length, 0); // 재실행해도 탭이 늘지 않는다
+  assert.deepEqual(calls.update.map((r) => r.view_id).sort(), ['v1', 'v2', 'v3', 'v4']);
 });
 
 test('createViews errors when the SDK has no views endpoint (old @notionhq/client)', async () => {

@@ -95,10 +95,35 @@ export function computeSyncDiff(localPages, map) {
 
 export function loadRemoteMap(vaultPath) {
   const file = path.join(vaultPath, REMOTE_MAP_FILE);
-  if (!fs.existsSync(file)) return { version: 1, pages: {} };
+  if (!fs.existsSync(file)) return { version: 2, provider: undefined, databases: {} };
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return { version: parsed.version || 1, provider: parsed.provider, viewsCreated: parsed.viewsCreated, pages: parsed.pages || {} };
+
+    // v1(레거시) 호환: 기존 flat 구조 { version, provider, viewsCreated?, databaseId?, pages? }를
+    // v2 구조 { version, provider, databases: { [dbId]: { viewsCreated?, pages } } }로 마이그레이션한다.
+    if (!parsed.databases) {
+      // v1 맵이다. databaseId가 있으면 그것으로 키하고, 없으면 pages를 버린다(귀속 불가능).
+      const migrated = {
+        version: 2,
+        provider: parsed.provider,
+        databases: {},
+      };
+      if (parsed.pages && parsed.databaseId) {
+        migrated.databases[parsed.databaseId] = {
+          viewsCreated: parsed.viewsCreated,
+          pages: parsed.pages,
+        };
+      }
+      // databaseId 없이 pages만 있는 경우는 버린다: 어느 DB인지 알 수 없고 재사용하면 버그다.
+      return migrated;
+    }
+
+    // v2 맵이다.
+    return {
+      version: parsed.version || 2,
+      provider: parsed.provider,
+      databases: parsed.databases || {},
+    };
   } catch (error) {
     throw new Error(`${file} 파싱 실패: ${error.message}`);
   }
@@ -107,7 +132,19 @@ export function loadRemoteMap(vaultPath) {
 export function saveRemoteMap(vaultPath, map) {
   const file = path.join(vaultPath, REMOTE_MAP_FILE);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(map, null, 2)}\n`);
+  // v2 구조로 저장하고 버전 명시
+  const toSave = { ...map, version: 2 };
+  fs.writeFileSync(file, `${JSON.stringify(toSave, null, 2)}\n`);
+}
+
+// 원격 발행 설정을 제거할 때 해당 DB의 매핑도 제거한다.
+// vault path와 database id가 있으면 그 DB의 항목을 remote-map에서 지운다.
+export function deleteRemoteDatabaseMapping(vaultPath, databaseId) {
+  const map = loadRemoteMap(vaultPath);
+  if (map.databases[databaseId]) {
+    delete map.databases[databaseId];
+    saveRemoteMap(vaultPath, map);
+  }
 }
 
 // ── 오케스트레이터 ────────────────────────────────────────────────────────
@@ -120,8 +157,17 @@ export function saveRemoteMap(vaultPath, map) {
  */
 export async function pushSync(vaultPath, { provider, client, ctx = {}, subdirs, dryRun = false, limit } = {}) {
   const map = loadRemoteMap(vaultPath);
+
+  // 각 DB의 매핑은 독립적으로 관리한다. 대상 DB의 서브-엔트리를 생성하거나 가져온다.
+  if (!ctx.databaseId) throw new Error('ctx.databaseId는 필수입니다.');
+  if (!map.databases[ctx.databaseId]) {
+    map.databases[ctx.databaseId] = { viewsCreated: undefined, pages: {} };
+  }
+  const dbEntry = map.databases[ctx.databaseId];
+
   const local = scanLocalPages(vaultPath, subdirs);
-  const diff = computeSyncDiff(local, map);
+  // computeSyncDiff는 { pages } 객체를 기대한다.
+  const diff = computeSyncDiff(local, dbEntry);
 
   let targets = [...diff.create, ...diff.update];
   if (limit) targets = targets.slice(0, limit);
@@ -147,7 +193,7 @@ export async function pushSync(vaultPath, { provider, client, ctx = {}, subdirs,
       remoteId = await provider.createRemotePage(client, ctx, payload);
       summary.created += 1;
     }
-    map.pages[page.slug] = {
+    dbEntry.pages[page.slug] = {
       remoteId,
       hash: page.hash,
       syncedAt: now,
@@ -155,12 +201,12 @@ export async function pushSync(vaultPath, { provider, client, ctx = {}, subdirs,
     };
   }
 
-  // 첫 발행 시 대상 DB에 뷰 탭을 자동 생성한다(초기 1회, map 플래그로 idempotent).
+  // 첫 발행 시 대상 DB에 뷰 탭을 자동 생성한다(초기 1회, DB별 플래그로 idempotent).
   // 뷰 생성 실패는 발행 자체를 깨뜨리지 않는다(발행은 이미 끝났다) — 경고만 담는다.
-  if (!map.viewsCreated && ctx.databaseId && typeof provider.createViews === 'function') {
+  if (!dbEntry.viewsCreated && ctx.databaseId && typeof provider.createViews === 'function') {
     try {
       summary.viewsCreated = await provider.createViews(client, { databaseId: ctx.databaseId });
-      map.viewsCreated = now;
+      dbEntry.viewsCreated = now;
     } catch (error) {
       summary.viewsError = error.message;
     }

@@ -4,12 +4,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  deleteSecret,
+  addConnection,
+  connectionKey,
   ensureSecretsGitignore,
-  getSecret,
+  getConnection,
+  getConnectionToken,
+  hasConnection,
+  legacyConnectionName,
+  listConnections,
   loadSecrets,
-  secretKey,
-  setSecret,
+  removeConnection,
 } from '../src/secrets.js';
 
 function tmpDir() {
@@ -20,40 +24,66 @@ function secretsPath() {
   return path.join(tmpDir(), 'secrets.json');
 }
 
-test('secretKey normalizes vault names and matches token.js scheme', () => {
-  assert.equal(secretKey('notion', 'personal'), 'notion:PERSONAL');
-  assert.equal(secretKey('notion', 'personal-wiki'), 'notion:PERSONAL_WIKI');
-  assert.equal(secretKey('notion', null), 'notion:*');
+test('connectionKey builds <provider>:<name> and rejects names with a colon', () => {
+  assert.equal(connectionKey('notion', 'personal'), 'notion:personal');
+  assert.equal(connectionKey('notion', '  work-team '), 'notion:work-team');
+  assert.throws(() => connectionKey('notion', 'bad:name'), /':'/);
+  assert.throws(() => connectionKey('notion', ''), /비었/);
 });
 
-test('set/get/delete round-trip per provider+vault', () => {
+test('legacyConnectionName maps v1 vault keys to v2 connection names', () => {
+  assert.equal(legacyConnectionName('*'), 'default');
+  assert.equal(legacyConnectionName(''), 'default');
+  assert.equal(legacyConnectionName('PERSONAL_WIKI'), 'personal_wiki');
+});
+
+test('add/get/remove round-trip per provider+connection', () => {
   const file = secretsPath();
-  assert.equal(getSecret(file, 'notion', 'personal'), undefined);
-  setSecret(file, 'notion', 'personal', 'secret_abc');
-  assert.equal(getSecret(file, 'notion', 'personal'), 'secret_abc');
-  assert.equal(deleteSecret(file, 'notion', 'personal'), true);
-  assert.equal(deleteSecret(file, 'notion', 'personal'), false);
-  assert.equal(getSecret(file, 'notion', 'personal'), undefined);
+  assert.equal(getConnectionToken(file, 'notion', 'personal'), undefined);
+  addConnection(file, 'notion', 'personal', { token: 'secret_abc', account: "Jane's WS" });
+  assert.equal(getConnectionToken(file, 'notion', 'personal'), 'secret_abc');
+  assert.equal(getConnection(file, 'notion', 'personal').account, "Jane's WS");
+  assert.equal(hasConnection(file, 'notion', 'personal'), true);
+  assert.equal(removeConnection(file, 'notion', 'personal'), true);
+  assert.equal(removeConnection(file, 'notion', 'personal'), false);
+  assert.equal(getConnectionToken(file, 'notion', 'personal'), undefined);
 });
 
-test('getSecret falls back from vault-specific to provider-wide (*)', () => {
+test('addConnection rejects an empty token', () => {
+  assert.throws(() => addConnection(secretsPath(), 'notion', 'personal', {}), /토큰이 없/);
+});
+
+test('listConnections filters by provider', () => {
   const file = secretsPath();
-  setSecret(file, 'notion', null, 'shared');
-  assert.equal(getSecret(file, 'notion', 'anyvault'), 'shared');
-  setSecret(file, 'notion', 'anyvault', 'specific');
-  assert.equal(getSecret(file, 'notion', 'anyvault'), 'specific');
-  assert.equal(getSecret(file, 'notion', 'othervault'), 'shared');
+  addConnection(file, 'notion', 'personal', { token: 'a' });
+  addConnection(file, 'notion', 'work', { token: 'b' });
+  addConnection(file, 'confluence', 'team', { token: 'c' });
+  assert.deepEqual(listConnections(file, 'notion').map((c) => c.name).sort(), ['personal', 'work']);
+  assert.equal(listConnections(file).length, 3);
 });
 
-test('loadSecrets returns an empty store when the file is absent', () => {
+test('loadSecrets returns an empty v2 store when the file is absent', () => {
   const store = loadSecrets(path.join(tmpDir(), 'nope.json'));
-  assert.deepEqual(store, { version: 1, tokens: {} });
+  assert.deepEqual(store, { version: 2, connections: {} });
+});
+
+test('loadSecrets migrates a v1 token store to v2 connections', () => {
+  const file = secretsPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({
+    version: 1,
+    tokens: { 'notion:*': { token: 'shared' }, 'notion:PERSONAL': { token: 'specific' } },
+  }));
+  const store = loadSecrets(file);
+  assert.equal(store.version, 2);
+  assert.equal(store.connections['notion:default'].token, 'shared');
+  assert.equal(store.connections['notion:personal'].token, 'specific');
 });
 
 test('writeSecrets writes 0600 and ensures a .gitignore entry', { skip: process.platform === 'win32' }, () => {
   const dir = tmpDir();
   const file = path.join(dir, 'secrets.json');
-  setSecret(file, 'notion', 'personal', 'x');
+  addConnection(file, 'notion', 'personal', { token: 'x' });
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   assert.match(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8'), /^secrets\.json$/m);
 });

@@ -309,11 +309,31 @@ export function buildViewRequests({ dataSourceId, databaseId, propertyIds = {}, 
   return requests;
 }
 
+// views.list로 대상 DB의 기존 뷰를 조회해 { name, type }로 정규화한다. Views API 부재 시 빈 배열.
+async function listExistingViews(client, databaseId) {
+  if (!client.views || typeof client.views.list !== 'function') return [];
+  const refs = [];
+  let cursor;
+  do {
+    const res = await client.views.list({ database_id: databaseId, start_cursor: cursor, page_size: 100 });
+    refs.push(...(res.results || []));
+    cursor = res.has_more ? res.next_cursor : undefined;
+  } while (cursor);
+  // list는 id만 주므로 각 뷰를 조회해 name·type을 얻는다.
+  const views = [];
+  for (const ref of refs) {
+    const v = await client.views.retrieve({ view_id: ref.id });
+    views.push({ id: v.id, name: v.name, type: v.type });
+  }
+  return views;
+}
+
 /**
- * 대상 DB에 뷰 탭(All/By Type/Gallery/Recent)을 자동으로 만든다. Views API가 필요하므로
+ * 대상 DB에 뷰 탭(All/By Type/Gallery/Recent)을 멱등하게 맞춘다. Views API가 필요하므로
  * @notionhq/client 5.x 이상에서만 동작한다(client.views 부재 시 친절한 에러).
- * databases.retrieve로 data_source_id와 속성 id를 뽑아 buildViewRequests로 요청을 만들고
- * 순차 생성한다. 반환: 만든 뷰 이름 배열. 뷰 탭 재정렬·중복 방지는 하지 않는다(초기 1회용).
+ * 새 DB엔 Notion이 기본 Table 뷰를 하나 주므로, All(Table)은 그 기본 뷰를 재사용해 update하고
+ * (중복 방지), 같은 이름의 뷰가 이미 있으면 update, 없으면 create한다. 재실행해도 탭이 늘지 않는다.
+ * 반환: 만들거나 갱신한 뷰 이름 배열.
  */
 export async function createViews(client, { databaseId } = {}) {
   if (!databaseId) throw new Error('데이터베이스 id가 필요합니다.');
@@ -335,16 +355,28 @@ export async function createViews(client, { databaseId } = {}) {
     propertyNames.push(propName);
     if (value && value.id) propertyIds[propName] = value.id;
   }
-  const created = [];
+
+  const existing = await listExistingViews(client, databaseId);
+  const byName = new Map(existing.map((v) => [v.name, v]));
+  // 이름이 안 맞는 기본 Table 뷰(예: 'Default view')는 All로 흡수해 중복을 없앤다.
+  const defaultTable = existing.find((v) => v.type === 'table' && !['All', 'By Type', 'Gallery', 'Recent'].includes(v.name));
+
+  const touched = [];
   try {
     for (const request of buildViewRequests({ dataSourceId, databaseId, propertyIds, propertyNames })) {
-      await client.views.create(request);
-      created.push(request.name);
+      const { data_source_id, database_id, type, ...settings } = request; // update엔 type·부모 id를 안 넣는다.
+      const match = byName.get(request.name) || (request.name === 'All' ? defaultTable : undefined);
+      if (match) {
+        await client.views.update({ view_id: match.id, ...settings });
+      } else {
+        await client.views.create(request);
+      }
+      touched.push(request.name);
     }
   } catch (error) {
     throw new Error(`Notion 뷰 생성 실패 — ${notionErrorMessage(error)}`);
   }
-  return created;
+  return touched;
 }
 
 // ── 마크다운 → Notion 블록 ────────────────────────────────────────────────

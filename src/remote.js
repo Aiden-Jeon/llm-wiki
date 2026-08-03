@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { legacyConnectionName } from './secrets.js';
+import { normalizeVaultKey } from './providers/token.js';
 
 // 볼트별 원격 발행/수집 설정을 읽고 쓴다. provider-중립적인 진입점이다.
 // 설정은 볼트가 아니라 전역 config 디렉터리의 publish.json에 담는다(볼트와 분리).
@@ -9,6 +11,7 @@ import path from 'node:path';
 //     "vaults": {
 //       "personal": {
 //         "provider": "notion",
+//         "connection": "personal",
 //         "publish": { "databaseId": "…", "titleProperty": "Name", "syncedSubdirs": ["wiki/entities", …] },
 //         "inbox":   { "databaseId": "…" },
 //         "allowPublish": false,
@@ -16,7 +19,8 @@ import path from 'node:path';
 //       }
 //     }
 //   }
-// 엔트리의 provider 필드가 어떤 원격 대상인지 결정한다(없으면 기본 'notion' — 첫 구현체).
+// 엔트리의 provider 필드가 어떤 원격 대상인지, connection 필드가 secrets store의 어떤
+// named connection(토큰)을 쓰는지 결정한다(provider 없으면 기본 'notion' — 첫 구현체).
 // 비밀(토큰)은 이 파일에 절대 담지 않는다 — secrets store 전용.
 
 export const DEFAULT_PROVIDER = 'notion';
@@ -54,6 +58,9 @@ export function loadRemoteConfig(publishPath, vaultName) {
   const config = store.vaults[vaultName];
   if (!config) return null;
   if (!config.provider) config.provider = DEFAULT_PROVIDER;
+  // connection이 없는 레거시 엔트리는 볼트 이름에서 마이그레이션 규칙으로 유추한다
+  // (secrets.js의 legacyConnectionName과 반드시 일치해야 store 폴백이 맞물린다).
+  if (!config.connection) config.connection = legacyConnectionName(normalizeVaultKey(vaultName));
   return config;
 }
 

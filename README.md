@@ -198,6 +198,7 @@ CLI는 관리형 워크스페이스를 준비한 뒤 에이전트를 실행하�
 | `llmwiki capture [options]` | 자유 텍스트 메모를 볼트 `raw/notes/`에 저장 |
 | `llmwiki publish [vault] [--dry-run]` | 로컬 위키를 원격(provider)으로 단방향 발행 (view) |
 | `llmwiki publish add/list/remove` | 발행 설정을 관리 (볼트와 분리, 전역 `publish.json`) |
+| `llmwiki connection add/list/remove` | 원격 provider 토큰을 이름 붙여 관리 (워크스페이스별 연결, `secrets.json`) |
 | `llmwiki publish view [vault]` | 대상 DB에 뷰 탭(Table/Board/Gallery/List) 강제 재생성 (평소엔 첫 발행 때 자동) |
 | `llmwiki inbox pull [vault] [--dry-run]` | 원격(provider) inbox의 새 항목을 가져옴 |
 
@@ -280,34 +281,43 @@ llmwiki inbox pull personal --dry-run           # Notion inbox 새 항목 미리
 
 로컬에서 작업한 위키를 원격 저장소에 **단방향(local→원격)** 으로 발행하고(`publish`), 원격 inbox에서 새 정보를 가져옵니다(`inbox pull`). 원격 대상은 **provider**로 추상화되어 있으며, 현재 Notion을 지원합니다.
 
-발행 설정은 볼트와 분리돼 있어 `publish add`로 따로 연결합니다(볼트 추가와 독립). 대화형(TTY)으로 실행하면 토큰을 넣은 뒤 **대상 데이터베이스를 새로 만들지 / 기존 것을 쓸지** 물어보므로 DB id를 직접 찾을 필요가 없습니다. 이미 저장·설정된 토큰(env 또는 `secrets.json`)이 있으면 재입력 없이 재사용합니다. 저장 전에 provider API로 검증(토큰 유효성 + 대상 DB)한 뒤, 토큰은 설정 디렉터리 `secrets.json`(`0600`)에, 대상 설정은 전역 `publish.json`에 기록합니다.
+발행 설정은 볼트와 분리돼 있어 `publish add`로 따로 연결합니다(볼트 추가와 독립). 토큰은 **이름 붙인 연결(named connection)** 로 저장하므로, 같은 provider라도 워크스페이스(계정)가 여러 개면 각각 이름을 붙여 두고 볼트마다 골라 쓸 수 있습니다. 대화형(TTY) `publish add`는 저장된 연결이 있으면 **그중에서 고르거나 새로 추가**하고, 이어서 **대상 데이터베이스를 새로 만들지 / 기존 것을 쓸지** 물어봅니다. 저장 전에 provider API로 검증(토큰 유효성 + 대상 DB)한 뒤, 토큰은 설정 디렉터리 `secrets.json`(`0600`)에 연결로, 대상 설정은 전역 `publish.json`에(어떤 연결을 쓰는지 이름과 함께) 기록합니다.
 
 ```bash
 # 볼트는 발행과 무관하게 먼저 등록
 llmwiki vault add --name personal --path ~/wikis/personal
 
-# 발행 설정 연결 — 대화형: 토큰 입력 → publish/inbox 대상 선택
+# (선택) 토큰을 이름 붙여 미리 저장 — 워크스페이스별로 여러 개 가능
+llmwiki connection add --remote notion --name personal --remote-token secret_xxx
+llmwiki connection list              # 저장된 연결과 이를 쓰는 볼트 확인
+llmwiki connection remove personal   # 저장된 연결(토큰) 삭제 — 쓰는 볼트가 있으면 경고 후 확인
+
+# 발행 설정 연결 — 대화형: 연결 선택(또는 새 토큰) → publish/inbox 대상 선택
 #   · "새 데이터베이스 생성" → 부모 페이지를 고르면 스키마까지 갖춰 만들어 줌
 #   · "기존 데이터베이스 사용" → 접근 가능한 DB 목록에서 선택 (스키마가 다르면 누락 속성 추가 여부를 물음)
 llmwiki publish add personal
 
-# 비대화형(CI 등)은 플래그로 DB id를 직접 지정
+# 비대화형(CI 등)은 플래그로 연결·DB id를 직접 지정
+#   · --connection <name>으로 저장된 연결 재사용, 없으면 --remote-token으로 새로 저장
+#     (--connection 생략 시 연결 이름은 볼트 이름으로 기본 지정)
 llmwiki publish add personal \
-  --remote notion --remote-token secret_xxx --publish-db <db-id> --inbox-db <inbox-db-id>
+  --remote notion --connection personal --remote-token secret_xxx --publish-db <db-id> --inbox-db <inbox-db-id>
 
-llmwiki publish list                 # 등록된 발행 설정 확인
+llmwiki publish list                 # 등록된 발행 설정 확인 (연결 이름 포함)
 llmwiki publish personal --dry-run   # diff 미리보기 (토큰 없이도 가능)
-llmwiki publish personal             # 없는/바뀐 페이지만 push (저장된 토큰 사용, 재입력 불필요)
-llmwiki publish remove personal      # 발행 설정 삭제(저장된 토큰은 물어본 뒤 삭제, --purge-token/--keep-token)
+llmwiki publish personal             # 없는/바뀐 페이지만 push (저장된 연결 토큰 사용)
+llmwiki publish remove personal      # 발행 설정만 삭제 — 그 연결을 쓰는 볼트가 더 없으면(고아) 토큰도 지울지 물어봄
+                                     #   (--purge-token/--keep-token으로 강제, 공유 연결은 안 지움)
 ```
 
-- 발행 설정은 전역 config의 `publish.json`에 볼트 이름을 키로 둡니다(토큰 제외). `provider`가 원격 대상을 결정합니다:
+- 발행 설정은 전역 config의 `publish.json`에 볼트 이름을 키로 둡니다(토큰 제외). `provider`가 원격 대상을, `connection`이 secrets store의 어떤 연결(토큰)을 쓸지 결정합니다:
   ```json
   {
     "version": 1,
     "vaults": {
       "personal": {
         "provider": "notion",
+        "connection": "personal",
         "publish": { "databaseId": "…", "syncedSubdirs": ["wiki/entities", "wiki/concepts", "wiki/sources", "wiki/analyses"] },
         "inbox": { "databaseId": "…" },
         "allowPublish": false
@@ -316,7 +326,8 @@ llmwiki publish remove personal      # 발행 설정 삭제(저장된 토큰은 
   }
   ```
 - **설정=전역, 상태=볼트.** 어디로·무엇을 발행할지는 볼트 밖 `publish.json`에서 관리하고, 발행 상태(`_meta/remote-map.json`)만 볼트에 남겨 git 볼트와 함께 이동하게 합니다(여러 머신에서 중복 발행 방지).
-- **토큰은 env 또는 설정 디렉터리 `secrets.json`에만** 둡니다(레지스트리·git·`publish.json` 저장 금지). `secrets.json`은 `0600`이며 `.gitignore`·`config export`에서 제외됩니다. 조회 순서: `publish.json` 엔트리의 `tokenEnv`(env) → `LLMWIKI_<PROVIDER>_TOKEN_<VAULT>`(env) → `LLMWIKI_<PROVIDER>_TOKEN`(env) → `secrets.json`. env가 store보다 우선이라 CI·스크립트에서 저장 토큰을 덮어쓸 수 있습니다.
+- **토큰은 env 또는 설정 디렉터리 `secrets.json`의 named connection에만** 둡니다(레지스트리·git·`publish.json` 저장 금지). `secrets.json`은 `0600`이며 `.gitignore`·`config export`에서 제외됩니다. 조회 순서: `publish.json` 엔트리의 `tokenEnv`(env) → `LLMWIKI_<PROVIDER>_TOKEN_<VAULT>`(env) → `LLMWIKI_<PROVIDER>_TOKEN`(env) → `secrets.json`의 연결(`publish.json`의 `connection` 이름). env가 store보다 우선이라 CI·스크립트에서 저장 토큰을 덮어쓸 수 있습니다. **하나의 연결을 여러 볼트가 공유**할 수 있으므로 `publish remove`는 설정만 해제하고, 그 볼트를 지운 뒤 해당 연결을 쓰는 볼트가 하나도 안 남을 때만(고아 연결) 토큰도 지울지 물어봅니다(`--purge-token`/`--keep-token`으로 강제, 비대화형은 유지). 아직 다른 볼트가 쓰는 공유 연결은 지우지 않습니다 — 그런 토큰은 `connection remove`로만 지웁니다.
+- v1(`notion:<VAULT>` / 공용 `notion:*`) 토큰은 처음 읽을 때 자동으로 연결로 마이그레이션됩니다(`notion:*` → `default`, `notion:<VAULT>` → 소문자 볼트 키). 연결 이름이 없는 기존 `publish.json` 엔트리도 같은 규칙으로 해소돼 재설정 없이 그대로 동작합니다.
 - 발행 상태는 `_meta/remote-map.json`에 슬러그별 `remoteId`·콘텐츠 해시로 기록합니다. 해시가 바뀐 페이지만 갱신하고, 원격→local 역방향이나 원격 페이지 삭제는 하지 않습니다.
 - `kind: secure` 볼트는 `publish.json` 엔트리에 `"allowPublish": true`가 있어야 하고(`publish add --allow-publish`), push 전 확인·익명화 게이트를 거칩니다.
 - Notion provider는 `@notionhq/client` 5.x가 필요합니다(선택 의존성): `npm i @notionhq/client`. 발행·inbox는 하위 버전도 되지만 `publish view`(뷰 자동 생성)는 5.x의 Views API가 필요합니다.

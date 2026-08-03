@@ -102,7 +102,7 @@ test('scanLocalPages backfills sparse frontmatter', () => {
 test('pushSync --dry-run reports the plan and writes nothing', async () => {
   const vault = tmpVault();
   writePage(vault, 'wiki/concepts', 'rag', BASE_FIELDS);
-  const summary = await pushSync(vault, { provider: stubProvider(), subdirs: ['wiki/concepts'], dryRun: true });
+  const summary = await pushSync(vault, { provider: stubProvider(), client: {}, ctx: { databaseId: 'db' }, subdirs: ['wiki/concepts'], dryRun: true });
   assert.equal(summary.planned.create, 1);
   assert.equal(summary.created, 0);
   assert.ok(!fs.existsSync(path.join(vault, '_meta', 'remote-map.json')));
@@ -117,8 +117,10 @@ test('pushSync creates pages via the provider and records the mapping', async ()
   assert.equal(provider.calls.create, 1);
   const map = loadRemoteMap(vault);
   assert.equal(map.provider, 'stub');
-  assert.equal(map.pages.rag.remoteId, 'remote-1');
-  assert.match(map.pages.rag.hash, /^sha256:/);
+  assert.equal(map.version, 2);
+  assert.ok(map.databases.db);
+  assert.equal(map.databases.db.pages.rag.remoteId, 'remote-1');
+  assert.match(map.databases.db.pages.rag.hash, /^sha256:/);
 });
 
 test('pushSync updates a changed page and rewrites the stored hash', async () => {
@@ -126,14 +128,18 @@ test('pushSync updates a changed page and rewrites the stored hash', async () =>
   writePage(vault, 'wiki/concepts', 'rag', BASE_FIELDS, 'v2 body');
   fs.mkdirSync(path.join(vault, '_meta'), { recursive: true });
   fs.writeFileSync(path.join(vault, '_meta', 'remote-map.json'), JSON.stringify({
-    version: 1,
-    pages: { rag: { remoteId: 'remote-1', hash: 'sha256:old', syncedAt: '2024-01-01', title: 'RAG' } },
+    version: 2,
+    databases: {
+      db: {
+        pages: { rag: { remoteId: 'remote-1', hash: 'sha256:old', syncedAt: '2024-01-01', title: 'RAG' } },
+      },
+    },
   }));
   const provider = stubProvider();
   const summary = await pushSync(vault, { provider, client: {}, ctx: { databaseId: 'db' }, subdirs: ['wiki/concepts'] });
   assert.equal(summary.updated, 1);
   assert.equal(provider.calls.update, 1);
-  assert.equal(loadRemoteMap(vault).pages.rag.hash, contentHash({ ...BASE_FIELDS }, 'v2 body'));
+  assert.equal(loadRemoteMap(vault).databases.db.pages.rag.hash, contentHash({ ...BASE_FIELDS }, 'v2 body'));
 });
 
 test('pushSync auto-creates views once on first publish, then skips on the next run', async () => {
@@ -146,7 +152,7 @@ test('pushSync auto-creates views once on first publish, then skips on the next 
   const first = await pushSync(vault, { provider, client: {}, ctx: { databaseId: 'db' }, subdirs: ['wiki/concepts'] });
   assert.deepEqual(first.viewsCreated, ['All', 'By Type', 'Gallery', 'Recent']);
   assert.equal(viewCalls, 1);
-  assert.match(loadRemoteMap(vault).viewsCreated, /^\d{4}-\d{2}-\d{2}$/);
+  assert.match(loadRemoteMap(vault).databases.db.viewsCreated, /^\d{4}-\d{2}-\d{2}$/);
 
   // 두 번째 실행: 플래그가 있어 뷰를 다시 만들지 않는다(탭 중복 방지).
   writePage(vault, 'wiki/concepts', 'rag', BASE_FIELDS, 'changed');
@@ -163,5 +169,118 @@ test('pushSync keeps publishing even if view creation fails', async () => {
   const summary = await pushSync(vault, { provider, client: {}, ctx: { databaseId: 'db' }, subdirs: ['wiki/concepts'] });
   assert.equal(summary.created, 1); // 발행은 성공
   assert.equal(summary.viewsError, 'boom');
-  assert.equal(loadRemoteMap(vault).viewsCreated, undefined); // 실패 시 플래그 안 세움 → 다음에 재시도
+  assert.equal(loadRemoteMap(vault).databases.db.viewsCreated, undefined); // 실패 시 플래그 안 세움 → 다음에 재시도
+});
+
+test('loadRemoteMap migrates v1 flat map with databaseId to v2 databases[dbId]', () => {
+  const vault = tmpVault();
+  fs.mkdirSync(path.join(vault, '_meta'), { recursive: true });
+  // v1 레거시 맵
+  fs.writeFileSync(path.join(vault, '_meta', 'remote-map.json'), JSON.stringify({
+    version: 1,
+    provider: 'notion',
+    databaseId: 'db-old',
+    viewsCreated: '2024-01-01',
+    pages: { rag: { remoteId: 'remote-1', hash: 'sha256:abc', syncedAt: '2024-01-01', title: 'RAG' } },
+  }));
+
+  const map = loadRemoteMap(vault);
+  assert.equal(map.version, 2);
+  assert.equal(map.provider, 'notion');
+  assert.ok(map.databases['db-old']);
+  assert.equal(map.databases['db-old'].viewsCreated, '2024-01-01');
+  assert.equal(map.databases['db-old'].pages.rag.remoteId, 'remote-1');
+});
+
+test('loadRemoteMap drops pages from v1 map without databaseId (unattributable)', () => {
+  const vault = tmpVault();
+  fs.mkdirSync(path.join(vault, '_meta'), { recursive: true });
+  // v1 맵이지만 databaseId가 없다: pages를 버린다
+  fs.writeFileSync(path.join(vault, '_meta', 'remote-map.json'), JSON.stringify({
+    version: 1,
+    pages: { rag: { remoteId: 'remote-1', hash: 'sha256:abc', syncedAt: '2024-01-01', title: 'RAG' } },
+  }));
+
+  const map = loadRemoteMap(vault);
+  assert.equal(map.version, 2);
+  assert.deepEqual(map.databases, {}); // pages 버려짐
+});
+
+test('pushSync to database A records under databases.A; switching to B records under databases.B independently', async () => {
+  const vault = tmpVault();
+  writePage(vault, 'wiki/concepts', 'rag', BASE_FIELDS);
+
+  // DB A에 발행
+  const providerA = stubProvider();
+  const firstA = await pushSync(vault, { provider: providerA, client: {}, ctx: { databaseId: 'db-a' }, subdirs: ['wiki/concepts'] });
+  assert.equal(firstA.created, 1);
+
+  let map = loadRemoteMap(vault);
+  assert.ok(map.databases['db-a']);
+  assert.equal(map.databases['db-a'].pages.rag.remoteId, 'remote-1');
+  assert.ok(!map.databases['db-b']); // db-b는 아직 없다
+
+  // 내용 변경 후 DB B에 발행 (새로운 provider 사용)
+  writePage(vault, 'wiki/concepts', 'rag', BASE_FIELDS, 'v2');
+  const providerB = stubProvider();
+  const firstB = await pushSync(vault, { provider: providerB, client: {}, ctx: { databaseId: 'db-b' }, subdirs: ['wiki/concepts'] });
+  assert.equal(firstB.created, 1); // db-b에 새로 생성 (a의 매핑을 재사용 안 함)
+
+  map = loadRemoteMap(vault);
+  assert.ok(map.databases['db-a']); // db-a 매핑은 그대로 보존됨
+  assert.equal(map.databases['db-a'].pages.rag.remoteId, 'remote-1');
+  assert.ok(map.databases['db-b']); // db-b 매핑도 있다
+  assert.equal(map.databases['db-b'].pages.rag.remoteId, 'remote-1'); // 새로 생성됨 (독립적)
+});
+
+test('pushSync switches back to database A and uses its preserved mapping', async () => {
+  const vault = tmpVault();
+  writePage(vault, 'wiki/concepts', 'rag', BASE_FIELDS);
+
+  // DB A, 그 다음 DB B, 다시 DB A로
+  const providerA1 = stubProvider();
+  await pushSync(vault, { provider: providerA1, client: {}, ctx: { databaseId: 'db-a' }, subdirs: ['wiki/concepts'] });
+
+  const providerB = stubProvider();
+  writePage(vault, 'wiki/concepts', 'rag', BASE_FIELDS, 'v2-for-b');
+  await pushSync(vault, { provider: providerB, client: {}, ctx: { databaseId: 'db-b' }, subdirs: ['wiki/concepts'] });
+
+  // DB A로 돌아와서, 내용을 변경한다 (원본과 다르게)
+  writePage(vault, 'wiki/concepts', 'rag', BASE_FIELDS, 'v3-back-to-a');
+  const providerA2 = stubProvider();
+  const backToA = await pushSync(vault, { provider: providerA2, client: {}, ctx: { databaseId: 'db-a' }, subdirs: ['wiki/concepts'] });
+
+  // db-a의 매핑이 보존돼 있고 내용이 변경됐으므로 update로 처리 (create가 아님)
+  assert.equal(backToA.updated, 1);
+  assert.equal(backToA.created, 0);
+  assert.equal(providerA2.calls.update, 1);
+  assert.equal(providerA2.calls.create, 0);
+});
+
+test('pushSync per-database viewsCreated: first publish to a DB creates views, second to same DB skips', async () => {
+  const vault = tmpVault();
+  writePage(vault, 'wiki/concepts', 'rag', BASE_FIELDS);
+
+  // DB A에 처음 발행: 뷰 생성
+  const providerA1 = stubProvider();
+  let viewCallsA = 0;
+  providerA1.createViews = async () => { viewCallsA += 1; return ['All']; };
+  const firstA = await pushSync(vault, { provider: providerA1, client: {}, ctx: { databaseId: 'db-a' }, subdirs: ['wiki/concepts'] });
+  assert.equal(viewCallsA, 1);
+  assert.ok(firstA.viewsCreated);
+
+  // DB A로 다시: 뷰 안 만듦 (플래그 있음)
+  writePage(vault, 'wiki/concepts', 'rag', BASE_FIELDS, 'v2');
+  const providerA2 = stubProvider();
+  providerA2.createViews = async () => { viewCallsA += 1; return ['All']; };
+  const secondA = await pushSync(vault, { provider: providerA2, client: {}, ctx: { databaseId: 'db-a' }, subdirs: ['wiki/concepts'] });
+  assert.equal(viewCallsA, 1); // 증가 안 함
+
+  // DB B로 발행: db-b는 아직 viewsCreated가 없으므로 뷰 생성
+  const providerB = stubProvider();
+  let viewCallsB = 0;
+  providerB.createViews = async () => { viewCallsB += 1; return ['All']; };
+  const firstB = await pushSync(vault, { provider: providerB, client: {}, ctx: { databaseId: 'db-b' }, subdirs: ['wiki/concepts'] });
+  assert.equal(viewCallsB, 1);
+  assert.ok(firstB.viewsCreated);
 });
