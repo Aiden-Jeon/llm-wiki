@@ -398,8 +398,13 @@ test('listPages with maxDepth filters and sorts by depth (top-level first, then 
     { id: 'root', title: 'Root', depth: 1 },
     { id: 'orphan', title: 'Orphan', depth: 1 },
   ]);
-  // maxDepth 미지정: 전부(정렬은 그대로 depth 오름차순).
-  assert.equal((await listPages(client, {})).length, 4);
+  // maxDepth 미지정: 전부. 깊은 체인의 depth까지 정확히 매겨진다(root 1 → child 2 → grandchild 3).
+  assert.deepEqual(await listPages(client, {}), [
+    { id: 'root', title: 'Root', depth: 1 },
+    { id: 'orphan', title: 'Orphan', depth: 1 },
+    { id: 'child', title: 'Child', depth: 2 },
+    { id: 'grandchild', title: 'Grandchild', depth: 3 },
+  ]);
 });
 
 test('listPages excludeDatabaseChildren drops pages parented by a database (or data source)', async () => {

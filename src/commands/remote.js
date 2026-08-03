@@ -256,11 +256,16 @@ export async function configureRemote(paths, vault, opts = {}, { getProvider: re
 }
 
 const PAGE_PARENT_MESSAGE = '새 데이터베이스를 만들 부모 페이지';
+// select 스크롤 창 크기 — 페이지가 많아도 화면을 뒤덮지 않고 맨 위 검색 옵션이 늘 보이게 한다.
+const PAGE_PICKER_MAX_ITEMS = 10;
+// 페이지 id가 아닌 특수 동작을 나타내는 센티넬 값. Notion page id는 UUID라 이 문자열과 겹치지 않는다.
+const PICK_SEARCH = '__search__';
+const PICK_EXPAND = '__expand__';
 const pageParentLabel = (pg) => `${pg.depth > 1 ? '  └ ' : ''}${pg.title || '(제목 없음)'}`;
 
 /**
  * 부모 페이지 후보 중 하나를 고른다(TTY 전용). pages는 listPages가 준 depth 오름차순
- * [{ id, title, depth }]. 반환: 선택된 page id | '__search__'(검색 요청) | '__expand__'(펼치기) | null(취소).
+ * [{ id, title, depth }]. 반환: 선택된 page id | PICK_SEARCH(검색 요청) | PICK_EXPAND(펼치기) | null(취소).
  * expandable=false면 펼치기 옵션을 숨긴다(이미 전체/검색 결과를 보여줄 때).
  */
 async function pickPageFrom(pages, { expandable } = {}) {
@@ -270,12 +275,11 @@ async function pickPageFrom(pages, { expandable } = {}) {
   const canExpand = expandable && topLevel.length && pages.length > topLevel.length;
 
   // 검색은 맨 위에 둔다 — 목록이 길면(특히 DB 행이 많으면) 맨 아래 옵션은 스크롤에 가려 안 보인다.
-  const options = [{ value: '__search__', label: '🔍 제목으로 검색' }];
-  if (canExpand) options.push({ value: '__expand__', label: '↓ 하위 페이지도 보기' });
+  const options = [{ value: PICK_SEARCH, label: '🔍 제목으로 검색' }];
+  if (canExpand) options.push({ value: PICK_EXPAND, label: '↓ 하위 페이지도 보기' });
   for (const pg of shown) options.push({ value: pg.id, label: pageParentLabel(pg) });
 
-  // maxItems로 스크롤 창을 만든다 — 페이지가 많아도 화면을 뒤덮지 않고, 맨 위 검색 옵션이 늘 보인다.
-  const picked = await p.select({ message: PAGE_PARENT_MESSAGE, options, maxItems: 10 });
+  const picked = await p.select({ message: PAGE_PARENT_MESSAGE, options, maxItems: PAGE_PICKER_MAX_ITEMS });
   if (cancelPrompt(picked)) return null;
   return picked;
 }
@@ -288,14 +292,14 @@ async function pickPageFrom(pages, { expandable } = {}) {
 async function choosePageParent(provider, client, pages, withSpinner) {
   let picked = await pickPageFrom(pages, { expandable: true });
   if (picked === null) return null;
-  if (picked === '__expand__') {
+  if (picked === PICK_EXPAND) {
     // 펼치기: 전체(depth 순)를 다시 보여준다(검색은 계속 가능).
     picked = await pickPageFrom(pages, { expandable: false });
     if (picked === null) return null;
   }
 
   // 검색: 결과가 나올 때까지(또는 취소까지) 질의를 반복한다.
-  while (picked === '__search__') {
+  while (picked === PICK_SEARCH) {
     const query = await p.text({ message: '검색어(페이지 제목)', placeholder: '예: Projects' });
     if (cancelPrompt(query)) return null;
     const term = (query || '').trim();
@@ -306,9 +310,9 @@ async function choosePageParent(provider, client, pages, withSpinner) {
     const found = await withSpinner('검색 중', () => provider.listPages(client, { query: term, excludeDatabaseChildren: true }));
     if (!found.length) { p.log.warn(`'${term}'에 해당하는 페이지가 없습니다.`); continue; }
 
-    const options = [{ value: '__search__', label: '🔍 다시 검색' }];
+    const options = [{ value: PICK_SEARCH, label: '🔍 다시 검색' }];
     for (const pg of found) options.push({ value: pg.id, label: pg.title || '(제목 없음)' });
-    picked = await p.select({ message: PAGE_PARENT_MESSAGE, options, maxItems: 10 });
+    picked = await p.select({ message: PAGE_PARENT_MESSAGE, options, maxItems: PAGE_PICKER_MAX_ITEMS });
     if (cancelPrompt(picked)) return null;
   }
   return picked;

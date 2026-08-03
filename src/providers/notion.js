@@ -194,16 +194,26 @@ function isDatabaseChild(page) {
   return Boolean(parent && (parent.type === 'database_id' || parent.type === 'data_source_id'));
 }
 
-function pageDepth(pageId, byId, maxHops = 50) {
-  let depth = 1;
+function pageDepth(pageId, byId, memo, maxHops = 50) {
+  const cached = memo.get(pageId);
+  if (cached !== undefined) return cached;
+  // 이번 체인에서 방문한 노드들([자기 자신 … 마지막]) — 마지막 노드의 depth가 정해지면
+  // 자식들 depth도 되짚어 한 번에 채운다.
+  const chain = [];
+  let baseDepth = 1; // chain의 마지막(가장 조상 쪽) 노드의 depth
   let current = byId.get(pageId);
   for (let hop = 0; hop < maxHops; hop += 1) {
+    chain.push(current);
     const parentId = pageParentId(current);
-    if (!parentId || !byId.has(parentId)) return depth; // 최상위이거나 조상이 결과에 없음
-    depth += 1;
+    if (!parentId || !byId.has(parentId)) break; // 최상위이거나 조상이 결과에 없음 → 마지막 노드가 depth 1
+    const parentDepth = memo.get(parentId);
+    if (parentDepth !== undefined) { baseDepth = parentDepth + 1; break; } // 이미 계산된 조상에 붙는다
     current = byId.get(parentId);
   }
-  return depth;
+  // chain 끝(가장 조상)부터 되짚어 depth를 매긴다.
+  let depth = baseDepth;
+  for (let i = chain.length - 1; i >= 0; i -= 1, depth += 1) memo.set(chain[i].id, depth);
+  return memo.get(pageId);
 }
 
 /**
@@ -232,10 +242,11 @@ export async function listPages(client, { query, pageSize = 100, maxDepth, exclu
 
   const candidates = excludeDatabaseChildren ? pages.filter((page) => !isDatabaseChild(page)) : pages;
   const byId = new Map(candidates.map((page) => [page.id, page]));
+  const depthMemo = new Map();
   const withDepth = candidates.map((page, index) => ({
     id: page.id,
     title: extractNotionTitle(page),
-    depth: pageDepth(page.id, byId),
+    depth: pageDepth(page.id, byId, depthMemo),
     index,
   }));
   const kept = maxDepth == null ? withDepth : withDepth.filter((page) => page.depth <= maxDepth);
