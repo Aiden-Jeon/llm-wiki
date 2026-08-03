@@ -3,7 +3,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { parseOptions, prepareWorkspace } from '../src/cli.js';
+import {
+  extractAddDirFlag,
+  parseOptions,
+  prepareWorkspace,
+  serializeCommand,
+  splitCommand,
+} from '../src/cli.js';
 import { getPaths } from '../src/paths.js';
 import { writeRegistry } from '../src/registry.js';
 import { createSkill } from '../src/skills.js';
@@ -37,6 +43,29 @@ test('parseOptions treats declared booleans as flags', () => {
 test('parseOptions requires a value and collects positionals', () => {
   assert.throws(() => parseOptions(['--name'], { allowed: ['name'] }), /--name \uc635\uc158 \uac12\uc774 \ud544\uc694/);
   assert.deepEqual(parseOptions(['personal', '/tmp/v']).rest, ['personal', '/tmp/v']);
+});
+
+test('extractAddDirFlag consumes add-dir flags but preserves tokens after --', () => {
+  assert.deepEqual(extractAddDirFlag(['vibe', 'agent']), { command: ['vibe', 'agent'], addDir: undefined });
+  assert.deepEqual(extractAddDirFlag(['--add-dir', 'vibe']), { command: ['vibe'], addDir: true });
+  assert.deepEqual(extractAddDirFlag(['vibe', '--no-add-dir']), { command: ['vibe'], addDir: false });
+  // -- 이후는 경계로 취급해 실행 명령 인자로 그대로 보존한다.
+  assert.deepEqual(
+    extractAddDirFlag(['mycli', '--', '--add-dir', '.']),
+    { command: ['mycli', '--add-dir', '.'], addDir: undefined },
+  );
+  // -- 앞의 --no-add-dir는 여전히 설정 플래그로 소비된다.
+  assert.deepEqual(
+    extractAddDirFlag(['--no-add-dir', 'mycli', '--', '--add-dir']),
+    { command: ['mycli', '--add-dir'], addDir: false },
+  );
+});
+
+test('serializeCommand quotes whitespace tokens so splitCommand round-trips argv boundaries', () => {
+  const tokens = ['codex', 'wrapper', 'profile name'];
+  assert.equal(serializeCommand(tokens), 'codex wrapper "profile name"');
+  assert.deepEqual(splitCommand(serializeCommand(tokens)), tokens);
+  assert.throws(() => serializeCommand(['a"b']), /큰따옴표/);
 });
 
 test('prepareWorkspace refreshes managed files and keeps local agent state', () => {
@@ -80,6 +109,30 @@ test('prepareWorkspace publishes user skills as skills, commands and catalog', (
   prepareWorkspace(paths);
   assert.ok(!fs.existsSync(path.join(paths.workspace, '.claude/skills/weekly-retro')));
   assert.ok(!fs.existsSync(path.join(paths.workspace, '.claude/commands/weekly-retro.md')));
+});
+
+test('prepareWorkspace symlinks existing vaults into vaults/ and skips missing ones', () => {
+  const paths = tmpPaths();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-vault-'));
+  const realVault = path.join(root, 'personal');
+  fs.mkdirSync(realVault, { recursive: true });
+  fs.writeFileSync(path.join(realVault, 'index.md'), '# personal');
+  writeRegistry(paths.registry, [
+    { name: 'personal', path: realVault, kind: 'open' },
+    { name: 'ghost', path: path.join(root, 'does-not-exist'), kind: 'open' },
+  ]);
+
+  prepareWorkspace(paths);
+
+  const link = path.join(paths.workspace, 'vaults', 'personal');
+  assert.ok(fs.lstatSync(link).isSymbolicLink());
+  assert.equal(fs.readFileSync(path.join(link, 'index.md'), 'utf8'), '# personal');
+  assert.ok(!fs.existsSync(path.join(paths.workspace, 'vaults', 'ghost')));
+
+  // 볼트를 제거하면 다음 실행에서 링크도 사라진다.
+  writeRegistry(paths.registry, []);
+  prepareWorkspace(paths);
+  assert.ok(!fs.existsSync(path.join(paths.workspace, 'vaults', 'personal')));
 });
 
 test('prepareWorkspace fails with setup guidance when config is missing', () => {
