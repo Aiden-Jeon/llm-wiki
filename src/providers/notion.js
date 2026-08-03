@@ -176,11 +176,58 @@ export async function listDatabases(client, { query, pageSize = 100 } = {}) {
 }
 
 /**
- * 새 DB를 만들 부모로 쓸, integration이 접근 가능한 페이지를 검색한다(search API).
- * 반환: [{ id, title }].
+ * search 결과에 들어온 페이지들만으로 각 페이지의 depth를 계산한다.
+ * search 응답은 직속 parent(workspace / page_id / database_id)만 주고 전체 조상 체인은 없으므로,
+ * 결과 집합 안에서 부모를 거슬러 올라가며 센다. 조상이 결과에 없으면(공유 안 된 상위) 그 지점을
+ * 접근 가능한 최상위(depth 1)로 본다. workspace 직속은 depth 1, 그 자식은 depth 2.
+ * 사이클·유실 방지를 위해 최대 hop 수를 제한한다.
  */
-export async function listPages(client, { query, pageSize = 100 } = {}) {
-  const results = [];
+function pageParentId(page) {
+  const parent = page && page.parent;
+  return parent && parent.type === 'page_id' ? parent.page_id : null;
+}
+
+// DB의 행으로 존재하는 페이지인지(parent가 데이터베이스). 새 DB는 page_id parent에만 만들 수 있어
+// 이런 페이지는 부모 후보로 부적합하다.
+function isDatabaseChild(page) {
+  const parent = page && page.parent;
+  return Boolean(parent && (parent.type === 'database_id' || parent.type === 'data_source_id'));
+}
+
+function pageDepth(pageId, byId, memo, maxHops = 50) {
+  const cached = memo.get(pageId);
+  if (cached !== undefined) return cached;
+  // 이번 체인에서 방문한 노드들([자기 자신 … 마지막]) — 마지막 노드의 depth가 정해지면
+  // 자식들 depth도 되짚어 한 번에 채운다.
+  const chain = [];
+  let baseDepth = 1; // chain의 마지막(가장 조상 쪽) 노드의 depth
+  let current = byId.get(pageId);
+  for (let hop = 0; hop < maxHops; hop += 1) {
+    chain.push(current);
+    const parentId = pageParentId(current);
+    if (!parentId || !byId.has(parentId)) break; // 최상위이거나 조상이 결과에 없음 → 마지막 노드가 depth 1
+    const parentDepth = memo.get(parentId);
+    if (parentDepth !== undefined) { baseDepth = parentDepth + 1; break; } // 이미 계산된 조상에 붙는다
+    current = byId.get(parentId);
+  }
+  // chain 끝(가장 조상)부터 되짚어 depth를 매긴다.
+  let depth = baseDepth;
+  for (let i = chain.length - 1; i >= 0; i -= 1, depth += 1) memo.set(chain[i].id, depth);
+  return memo.get(pageId);
+}
+
+/**
+ * 새 DB를 만들 부모로 쓸, integration이 접근 가능한 페이지를 검색한다(search API).
+ * 반환: [{ id, title, depth }]. depth 오름차순으로 정렬한다(최상위 먼저, 그 다음 자식) —
+ * 같은 depth 안에서는 search가 준 순서를 유지한다.
+ * maxDepth를 주면 workspace 최상위 기준 그 depth까지만 남긴다(1=최상위, 2=+직속 자식).
+ * depth는 search 결과에 함께 들어온 페이지들로만 계산한다(조상이 결과 밖이면 최상위로 간주).
+ * excludeDatabaseChildren이면 DB의 행 페이지(parent가 데이터베이스)를 뺀다 —
+ * 새 DB는 page_id parent에만 만들 수 있어 부모 후보로 부적합하기 때문. depth 계산 전에 걸러
+ * DB 행이 depth 조상 노릇을 하지 않게 한다.
+ */
+export async function listPages(client, { query, pageSize = 100, maxDepth, excludeDatabaseChildren = false } = {}) {
+  const pages = [];
   let cursor;
   do {
     const response = await client.search({
@@ -189,10 +236,23 @@ export async function listPages(client, { query, pageSize = 100 } = {}) {
       start_cursor: cursor,
       page_size: pageSize,
     });
-    for (const page of response.results || []) results.push({ id: page.id, title: extractNotionTitle(page) });
+    for (const page of response.results || []) pages.push(page);
     cursor = response.has_more ? response.next_cursor : undefined;
   } while (cursor);
-  return results;
+
+  const candidates = excludeDatabaseChildren ? pages.filter((page) => !isDatabaseChild(page)) : pages;
+  const byId = new Map(candidates.map((page) => [page.id, page]));
+  const depthMemo = new Map();
+  const withDepth = candidates.map((page, index) => ({
+    id: page.id,
+    title: extractNotionTitle(page),
+    depth: pageDepth(page.id, byId, depthMemo),
+    index,
+  }));
+  const kept = maxDepth == null ? withDepth : withDepth.filter((page) => page.depth <= maxDepth);
+  // depth 오름차순, 동률이면 원래 순서 유지(안정 정렬).
+  kept.sort((a, b) => a.depth - b.depth || a.index - b.index);
+  return kept.map(({ id, title, depth }) => ({ id, title, depth }));
 }
 
 /**

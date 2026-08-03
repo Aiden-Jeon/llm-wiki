@@ -12,7 +12,7 @@
 //     verifyDatabase(client, { databaseId }) → { ok, title? }  대상 DB 존재 확인. 실패 시 throw.
 //   대상 선택/생성(선택 — 대화형 setup에서 씀. 없으면 CLI가 id 직접 입력으로 폴백):
 //     listDatabases(client, { query }) → [{ id, title }]      기존 DB 목록(선택지).
-//     listPages(client, { query }) → [{ id, title }]          새 DB 부모 페이지 후보.
+//     listPages(client, { query, maxDepth, excludeDatabaseChildren }) → [{ id, title, depth }]  새 DB 부모 후보(depth 오름차순).
 //     createDatabase(client, { parentPageId, title }) → { databaseId, titleProperty }
 //     inspectDatabase(client, { databaseId }) → { title, titleProperty, missing[], conflicts[], ok }
 //     applySchema(client, { databaseId, missing }) → 추가한 속성 이름[]   누락 속성만 추가.

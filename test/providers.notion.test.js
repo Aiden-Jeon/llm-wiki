@@ -369,7 +369,64 @@ test('listPages paginates the search API by page object type', async () => {
       return { results: [{ id: 'pg1', properties: { Name: { type: 'title', title: [{ plain_text: 'Home' }] } } }], has_more: false };
     },
   };
-  assert.deepEqual(await listPages(client, {}), [{ id: 'pg1', title: 'Home' }]);
+  assert.deepEqual(await listPages(client, {}), [{ id: 'pg1', title: 'Home', depth: 1 }]);
+});
+
+test('listPages with maxDepth filters and sorts by depth (top-level first, then children)', async () => {
+  // 계층: root(workspace) → child(root) → grandchild(child). orphan은 부모가 결과 밖 → 최상위 취급.
+  // search가 자식을 최상위보다 먼저 줘도 결과는 depth 오름차순으로 정렬돼야 한다.
+  const title = (t) => ({ Name: { type: 'title', title: [{ plain_text: t }] } });
+  const client = {
+    search: async () => ({
+      has_more: false,
+      results: [
+        { id: 'child', properties: title('Child'), parent: { type: 'page_id', page_id: 'root' } },
+        { id: 'root', properties: title('Root'), parent: { type: 'workspace' } },
+        { id: 'grandchild', properties: title('Grandchild'), parent: { type: 'page_id', page_id: 'child' } },
+        { id: 'orphan', properties: title('Orphan'), parent: { type: 'page_id', page_id: 'not-in-results' } },
+      ],
+    }),
+  };
+  // depth≤2: depth 1(root, orphan) 먼저, 그 다음 depth 2(child). grandchild(3)는 빠진다.
+  assert.deepEqual(await listPages(client, { maxDepth: 2 }), [
+    { id: 'root', title: 'Root', depth: 1 },
+    { id: 'orphan', title: 'Orphan', depth: 1 },
+    { id: 'child', title: 'Child', depth: 2 },
+  ]);
+  // depth≤1: 최상위(및 조상이 결과 밖인 것)만.
+  assert.deepEqual(await listPages(client, { maxDepth: 1 }), [
+    { id: 'root', title: 'Root', depth: 1 },
+    { id: 'orphan', title: 'Orphan', depth: 1 },
+  ]);
+  // maxDepth 미지정: 전부. 깊은 체인의 depth까지 정확히 매겨진다(root 1 → child 2 → grandchild 3).
+  assert.deepEqual(await listPages(client, {}), [
+    { id: 'root', title: 'Root', depth: 1 },
+    { id: 'orphan', title: 'Orphan', depth: 1 },
+    { id: 'child', title: 'Child', depth: 2 },
+    { id: 'grandchild', title: 'Grandchild', depth: 3 },
+  ]);
+});
+
+test('listPages excludeDatabaseChildren drops pages parented by a database (or data source)', async () => {
+  const title = (t) => ({ Name: { type: 'title', title: [{ plain_text: t }] } });
+  const client = {
+    search: async () => ({
+      has_more: false,
+      results: [
+        { id: 'home', properties: title('Home'), parent: { type: 'workspace' } },
+        { id: 'row1', properties: title('DB Row 1'), parent: { type: 'database_id', database_id: 'dbx' } },
+        { id: 'row2', properties: title('DB Row 2'), parent: { type: 'data_source_id', data_source_id: 'dsx' } },
+        { id: 'child', properties: title('Child'), parent: { type: 'page_id', page_id: 'home' } },
+      ],
+    }),
+  };
+  // DB/데이터소스 행은 빠지고 page/workspace parent만 남는다.
+  assert.deepEqual(await listPages(client, { excludeDatabaseChildren: true }), [
+    { id: 'home', title: 'Home', depth: 1 },
+    { id: 'child', title: 'Child', depth: 2 },
+  ]);
+  // 옵션 없으면 전부(기본 동작 유지).
+  assert.equal((await listPages(client, {})).length, 4);
 });
 
 test('createDatabase puts the full schema in initial_data_source and returns the title property', async () => {
