@@ -6,13 +6,10 @@
 
 핵심 목적은 **로컬에서 지식을 작업하고, 여러 머신에서 이어서 작업하며, 그 결과를 Notion 같은 원격 저장소에서 보여주는 것**입니다. 로컬 위키(볼트)를 중심으로 입력·공유·발행이 갈라집니다.
 
-```text
-① 입력 소스                ②  로컬 위키 (볼트)              ③ 원격 발행 (view)
-llmwiki new     ─┐                                    ┌─▶ llmwiki sync ─▶ 원격 (provider: Notion …)
-llmwiki capture ─┼─▶   raw/ → wiki/ (Markdown)   ─────┤        (local→원격 단방향)
-llmwiki inbox pull ┘        정본은 로컬                 └─▶ llmwiki vault sync ⇄ git repo
-                                                              (git 백엔드 · 머신 간 파일 공유)
-```
+![llm-wiki 전체 흐름: 입력 소스(new/capture/inbox pull) → 로컬 위키(볼트) → git repo(vault sync, 머신 간 공유) / 원격 provider(sync, 단방향 발행)](docs/flow.png)
+
+<!-- 위 이미지는 docs/flow.mmd(mermaid)에서 생성한다. 수정 후 재생성:
+     npx -p @mermaid-js/mermaid-cli mmdc -i docs/flow.mmd -o docs/flow.png -t neutral -b white --scale 3 -->
 
 - **입력 소스** — 새 정보를 로컬 볼트로 받아오는 창구(`new` / `capture` / `inbox pull`). [자세히](#입력-소스)
 - **로컬 위키** — 볼트의 `raw/`·`wiki/` Markdown이 언제나 정본입니다. 볼트는 그냥 로컬 폴더(`local`)일 수도, git repo(`git`)일 수도 있습니다. git 백엔드는 `llmwiki vault sync`로 여러 머신에서 같은 위키를 작업하게 해줍니다. [자세히](#볼트-백엔드-local--git)

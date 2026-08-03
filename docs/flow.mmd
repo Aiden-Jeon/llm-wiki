@@ -1,0 +1,13 @@
+flowchart LR
+  new["llmwiki new"] --> vault
+  capture["llmwiki capture"] --> vault
+  inbox["llmwiki inbox pull"] --> vault
+  vault["② 로컬 위키 (볼트)<br/>raw/ → wiki/ (Markdown)<br/>정본은 로컬"]
+  vault -->|llmwiki vault sync ⇄| git["git repo<br/>(머신 간 파일 공유)"]
+  vault -->|llmwiki sync →| remote["원격 provider<br/>(Notion … · 단방향)"]
+
+  subgraph 입력 소스
+    new
+    capture
+    inbox
+  end
