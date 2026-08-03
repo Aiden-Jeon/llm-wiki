@@ -23,8 +23,12 @@ CLI는 볼트 목록을 **레지스트리 파일**에서 읽는다. 경로를 �
 | `name` | 볼트 식별자 (예: `personal`, `work`) |
 | `path` | 로컬 절대/상대 경로 |
 | `kind` | `open` (일반) 또는 `secure` (보안 규칙 적용 — 쓰기 전 확인·익명화) |
+| `backend` | `local` (그냥 폴더) 또는 `git` (git repo, `llmwiki vault sync`로 머신 간 동기화) |
+| `origin` | git backend의 원격 URL (local이면 빈 값) |
 | `signals` | 이 볼트로 라우팅할 내용 신호 (쉼표 구분) |
-| `notes` | 선택. Notion 대상, 특기사항 등 |
+| `notes` | 선택. 원격 발행 대상, 특기사항 등 |
+
+`backend`는 **마크다운 파일 저장·동기화** 계층이고, `§ 원격 발행`의 원격 provider(Notion 등)는 **위키 view 발행** 계층이다. 두 축은 독립적이다(git backend 볼트를 Notion에도 발행 가능). 레지스트리는 하위호환을 위해 레거시 5컬럼 표(backend/origin 없음)도 읽으며, 이 경우 `backend=local`로 승격한다.
 
 ## 라우팅 결정 절차
 
@@ -44,13 +48,13 @@ secure 볼트로 쓰기가 해소되면:
 
 금지: 볼트 간 raw 내용 이동. 한 볼트의 원격 토큰/대상을 다른 볼트 내용에 사용. 단일 호출로 여러 볼트에 동시 원격 쓰기(토큰·API 버전이 다를 수 있음).
 
-원격 연동(`llmwiki sync`, `llmwiki inbox pull`)의 결정론 규칙:
+원격 연동(`llmwiki publish`, `llmwiki inbox pull`)의 결정론 규칙:
 
 - **provider로 추상화.** 원격 대상은 `_meta/remote.json`의 `provider` 값으로 결정한다(현재 지원: `notion`). 새 대상은 `src/providers/<name>.js` 구현 + 레지스트리 등록으로 붙고, orchestrator·diff·보안 규칙은 provider-중립으로 공유된다.
-- **호출당 정확히 한 볼트.** `sync`/`inbox`는 대상 볼트를 하나로 해소하고 그 볼트의 토큰·대상만 쓴다("sync all" 없음).
+- **호출당 정확히 한 볼트.** `publish`/`inbox`는 대상 볼트를 하나로 해소하고 그 볼트의 토큰·대상만 쓴다("publish all" 없음).
 - **토큰은 환경 변수에만.** 마크다운 레지스트리나 git에 저장하지 않는다. 조회 순서: `_meta/remote.json`의 `tokenEnv` → `LLMWIKI_<PROVIDER>_TOKEN_<VAULT>` → `LLMWIKI_<PROVIDER>_TOKEN`.
 - **비밀 아닌 설정만 커밋.** `_meta/remote.json`(provider, 대상 id, 동기화 서브디렉터리)과 상태 파일(`_meta/remote-map.json`, `_meta/remote-inbox.json`)은 git 커밋 대상이다.
-- **`kind: secure` 볼트 sync는 명시적 opt-in.** `_meta/remote.json`에 `"allowSync": true`가 없으면 거부하고, 첫 push 전 확인·익명화 게이트를 거친다.
+- **`kind: secure` 볼트 publish는 명시적 opt-in.** `_meta/remote.json`에 `"allowPublish": true`가 없으면 거부하고, 첫 push 전 확인·익명화 게이트를 거친다.
 
 ## 명령 카탈로그
 
@@ -101,9 +105,19 @@ secure 볼트로 쓰기가 해소되면:
 - **`llmwiki capture`** — 자유 텍스트 메모를 결정론적으로 대상 볼트의 `raw/notes/`에 저장한다(타임스탬프 파일명 + 최소 frontmatter). 저장 후 곧바로 ingest할지 물어본다. 대상은 `--vault`로 지정하거나 단일 볼트면 자동, 여러 개면 선택/에러. `kind: secure` 볼트 쓰기는 확인·익명화 게이트를 거친다.
 - **`llmwiki inbox pull [vault]`** — 원격 inbox의 새 항목을 결정론적으로 `raw/notes/`로 가져온다. 이미 가져온 항목은 `_meta/remote-inbox.json`으로 중복을 막는다. 원격 대상은 provider로 추상화되며(현재 Notion), 설정·토큰·보안은 `§ 보안 경계`의 원격 연동 규칙을 따른다. 입력 창구는 앞으로 더 늘어날 수 있다.
 
-## 결과물 sync (터미널 명령)
+## 볼트 백엔드 동기화 (터미널 명령)
 
-- **`llmwiki sync [vault] [--dry-run] [--limit <n>]`** — 로컬 위키(`wiki/**`)를 원격 대상으로 **단방향(local→원격)** push한다. diff를 떠 매핑에 없는 페이지는 생성, 콘텐츠 해시가 바뀐 페이지는 갱신하며, 원격→local이나 원격 페이지 삭제는 하지 않는다. 상태는 `_meta/remote-map.json`에 슬러그별 `remoteId`·`hash`로 기록한다. `--dry-run`은 토큰 없이 diff 요약만 낸다. 원격 대상은 `_meta/remote.json`의 `provider`로 결정하며(현재 Notion), 설정·토큰·보안은 `§ 보안 경계`의 원격 연동 규칙을 따른다.
+- **`llmwiki vault sync [name] [--message <msg>] [--no-push] [--pull-only]`** — git backend 볼트의 **마크다운 파일 자체**를 원격 git repo와 동기화한다: `pull --rebase --autostash` → 변경 있으면 `commit` → `push`. local backend 볼트는 대상이 아니다(안내 후 건너뜀). "주기적" 실행은 사용자가 cron/launchd로 예약한다(데몬 없음). 이건 아래 원격 발행(view)과 다른 계층이다.
+
+## 원격 발행 — 위키 view publish (터미널 명령)
+
+- **`llmwiki publish [vault] [--dry-run] [--limit <n>]`** — 로컬 위키(`wiki/**`)를 원격 대상으로 **단방향(local→원격)** push해 view를 발행한다. diff를 떠 매핑에 없는 페이지는 생성, 콘텐츠 해시가 바뀐 페이지는 갱신하며, 원격→local이나 원격 페이지 삭제는 하지 않는다. 상태는 `_meta/remote-map.json`에 슬러그별 `remoteId`·`hash`로 기록한다. `--dry-run`은 토큰 없이 diff 요약만 낸다. 원격 대상은 `_meta/remote.json`의 `provider`로 결정하며(현재 Notion), 설정·토큰·보안은 `§ 보안 경계`의 원격 연동 규칙을 따른다.
+
+> `vault sync`(git backend)는 마크다운 원본 파일을 머신 간에 공유하고, `publish`(provider)는 위키 view를 Notion 등에 발행한다. 서로 다른 계층이다.
+
+## 설정 export / import (터미널 명령)
+
+- **`llmwiki config export [--output <file>]`** / **`llmwiki config import <file> [--vaults-dir <dir>] [--force]`** — 볼트 레지스트리 + 커스텀 스킬을 JSON 번들로 옮긴다(머신 이관용). 토큰(env 전용)과 에이전트 오버라이드(머신별)는 제외한다. import 시 git backend 볼트는 origin으로 자동 clone해 등록하고, local 볼트는 경로를 알 수 없어 등록하지 않고 목록으로 안내한다.
 
 ## 커스텀 스킬
 

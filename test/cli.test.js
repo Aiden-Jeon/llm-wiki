@@ -12,9 +12,13 @@ import {
   serializeCommand,
   splitCommand,
 } from '../src/cli.js';
+import { spawnSync } from 'node:child_process';
 import { getPaths } from '../src/paths.js';
-import { writeRegistry } from '../src/registry.js';
+import { writeRegistry, readRegistry } from '../src/registry.js';
 import { createSkill } from '../src/skills.js';
+import { isGitAvailable } from '../src/git.js';
+
+const HAS_GIT = isGitAvailable();
 
 function tmpPaths() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-'));
@@ -78,10 +82,61 @@ test('buildIngestPrompt targets the slash command for claude and a task instruct
 test('main rejects unknown commands and bad inbox subcommands', async () => {
   await assert.rejects(main(['bogus']), /알 수 없는 명령: bogus/);
   await assert.rejects(main(['inbox', 'push']), /llmwiki inbox pull/);
+  await assert.rejects(main(['vault', 'bogus']), /add\|list\|show\|remove\|lint\|scaffold\|sync/);
 });
 
-test('sync accepts --dry-run so it errors on config, not on the flag', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-syncflag-'));
+test('vault sync skips a local backend vault instead of running git', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-vsync-'));
+  const paths = getPaths({ LLM_WIKI_CONFIG_HOME: path.join(root, 'config'), LLM_WIKI_DATA_HOME: path.join(root, 'data') });
+  const vaultPath = path.join(root, 'vault');
+  fs.mkdirSync(vaultPath, { recursive: true });
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
+
+  const prev = { c: process.env.LLM_WIKI_CONFIG_HOME, d: process.env.LLM_WIKI_DATA_HOME };
+  process.env.LLM_WIKI_CONFIG_HOME = path.join(root, 'config');
+  process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
+  const logs = [];
+  const origLog = console.log;
+  console.log = (msg) => logs.push(String(msg));
+  try {
+    const result = await main(['vault', 'sync', 'personal']);
+    assert.equal(result, false);
+    assert.ok(logs.some((l) => /local 백엔드라 sync 대상이 아닙니다/.test(l)));
+  } finally {
+    console.log = origLog;
+    if (prev.c === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prev.c;
+    if (prev.d === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prev.d;
+  }
+});
+
+test('vault add rejects a supplied --origin that mismatches an existing repo remote', { skip: !HAS_GIT }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-origin-'));
+  const realRemote = path.join(root, 'real.git');
+  const existing = path.join(root, 'existing');
+  spawnSync('git', ['init', '--bare', realRemote]);
+  spawnSync('git', ['clone', realRemote, existing]);
+
+  const prev = { c: process.env.LLM_WIKI_CONFIG_HOME, d: process.env.LLM_WIKI_DATA_HOME };
+  process.env.LLM_WIKI_CONFIG_HOME = path.join(root, 'config');
+  process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
+  const paths = getPaths({ LLM_WIKI_CONFIG_HOME: path.join(root, 'config'), LLM_WIKI_DATA_HOME: path.join(root, 'data') });
+  try {
+    // 잘못된 origin은 거부된다.
+    await assert.rejects(
+      () => main(['vault', 'add', '--name', 'gw', '--backend', 'git', '--path', existing, '--origin', path.join(root, 'wrong.git')]),
+      /실제 origin.*과 다릅니다/,
+    );
+    // origin 생략 시 실제 remote를 자동 기록한다.
+    await main(['vault', 'add', '--name', 'gw', '--backend', 'git', '--path', existing]);
+    assert.equal(readRegistry(paths.registry).find((v) => v.name === 'gw').origin, realRemote);
+  } finally {
+    if (prev.c === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prev.c;
+    if (prev.d === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prev.d;
+  }
+});
+
+test('publish accepts --dry-run so it errors on config, not on the flag', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-pubflag-'));
   const paths = getPaths({ LLM_WIKI_CONFIG_HOME: path.join(root, 'config'), LLM_WIKI_DATA_HOME: path.join(root, 'data') });
   const vaultPath = path.join(root, 'vault');
   fs.mkdirSync(vaultPath, { recursive: true });
@@ -93,7 +148,7 @@ test('sync accepts --dry-run so it errors on config, not on the flag', async () 
   process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
   try {
     // --dry-run이 allowed에 없으면 "알 수 없는 옵션"으로 실패한다. 설정 부재 에러까지 도달해야 정상.
-    await assert.rejects(() => main(['sync', 'personal', '--dry-run']), /원격 sync 설정이 없습니다/);
+    await assert.rejects(() => main(['publish', 'personal', '--dry-run']), /원격 publish 설정이 없습니다/);
   } finally {
     if (prevConfig === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prevConfig;
     if (prevData === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prevData;

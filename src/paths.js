@@ -15,6 +15,9 @@ export function getPaths(env = process.env, platform = process.platform) {
       ? path.join(env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'llm-wiki')
       : path.join(env.XDG_DATA_HOME || path.join(home, '.local', 'share'), 'llm-wiki'));
 
+  // git backend 볼트를 clone할 기본 위치. 홈 아래에 두어 사용자가 바로 찾을 수 있게 한다.
+  const vaultsHome = env.LLM_WIKI_VAULTS_HOME || path.join(home, 'llmwiki-vaults');
+
   return {
     packageRoot,
     configDir: configBase,
@@ -23,5 +26,6 @@ export function getPaths(env = process.env, platform = process.platform) {
     templatesDir: path.join(packageRoot, 'templates', 'skills'),
     vaultTemplateDir: path.join(packageRoot, 'templates', 'vault'),
     workspace: path.join(dataBase, 'workspace'),
+    vaultsHome,
   };
 }

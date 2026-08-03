@@ -34,15 +34,31 @@ import {
   writeRawNote,
 } from './capture.js';
 import { loadRemoteConfig } from './remote.js';
+import { renderNote } from './note.js';
 import { getProvider } from './providers/index.js';
 import { resolveRemoteToken } from './providers/token.js';
 import { pushSync } from './sync.js';
 import { pullInbox } from './inbox.js';
+import {
+  gitAddCommit,
+  gitClone,
+  gitPullRebase,
+  gitPush,
+  gitRemoteUrl,
+  gitSetRemote,
+  hasUpstream,
+  isGitAvailable,
+  isGitRepo,
+} from './git.js';
+import { applyImportBundle, readExportBundle, writeExportBundle } from './settings.js';
 
-const VAULT_OPTION_KEYS = ['name', 'path', 'kind', 'signals', 'notes'];
-const VAULT_ADD_USAGE = 'llmwiki vault add --name <name> --path <path> [--kind open|secure] [--signals <신호>] [--notes <메모>]';
+const VAULT_OPTION_KEYS = ['name', 'path', 'kind', 'backend', 'origin', 'signals', 'notes'];
+const VAULT_ADD_USAGE = 'llmwiki vault add --name <name> [--path <path>] [--kind open|secure] [--backend local|git] [--origin <git-url>] [--signals <신호>] [--notes <메모>]';
+const VAULT_SYNC_USAGE = 'llmwiki vault sync [name] [--message <msg>] [--no-push] [--pull-only]';
 const CAPTURE_USAGE = 'llmwiki capture [--vault <name>] [--title <제목>] [--text <내용>]';
-const SYNC_USAGE = 'llmwiki sync [vault] [--dry-run] [--limit <n>]';
+const PUBLISH_USAGE = 'llmwiki publish [vault] [--dry-run] [--limit <n>]';
+const CONFIG_EXPORT_USAGE = 'llmwiki config export [--output <file>]';
+const CONFIG_IMPORT_USAGE = 'llmwiki config import <file> [--vaults-dir <dir>] [--force]';
 const INBOX_USAGE = 'llmwiki inbox pull [vault] [--dry-run] [--limit <n>]';
 const SKILL_ADD_USAGE = 'llmwiki skill add <name> [--description <설명>] [--from <경로>] [--template <name>] [--force] [--no-edit]';
 const IS_WINDOWS = process.platform === 'win32';
@@ -56,8 +72,8 @@ const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운영합�
   llmwiki codex [agent args]      Codex로 바로 시작
   llmwiki new <url|경로|텍스트>    에이전트를 띄워 입력을 ingest
   llmwiki capture [options]       자유 텍스트 메모를 볼트 raw/notes/에 저장
-  llmwiki sync [vault] [--dry-run] [--limit <n>]   로컬 위키를 Notion으로 push (단방향)
-  llmwiki inbox pull [vault] [--dry-run] [--limit <n>]  Notion inbox의 새 항목을 가져옴
+  llmwiki publish [vault] [--dry-run] [--limit <n>]   로컬 위키를 원격에 발행 (view, 단방향)
+  llmwiki inbox pull [vault] [--dry-run] [--limit <n>]  원격 inbox의 새 항목을 가져옴
   llmwiki setup                   초기 설정 및 볼트 등록
   llmwiki vault add [options]     볼트 추가/수정
   llmwiki vault list [--json]     등록된 볼트 목록
@@ -65,6 +81,7 @@ const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운영합�
   llmwiki vault remove <name>     볼트 제거
   llmwiki vault lint [name] [--json]  볼트가 위키 스키마를 지키는지 검사
   llmwiki vault scaffold [name]   누락된 스키마 구조를 생성 (기존 파일 보존)
+  llmwiki vault sync [name] [--message <msg>] [--no-push] [--pull-only]  git 백엔드 볼트 동기화
   llmwiki agent list [--json]     에이전트 실행 명령 매핑 확인
   llmwiki agent set <name> [--add-dir] <cmd> [-- <명령 인자>]  claude/codex를 다른 명령으로 실행
   llmwiki agent reset <name>      실행 명령을 기본값(claude/codex)으로 복원
@@ -78,10 +95,18 @@ const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운영합�
   llmwiki doctor                  설정·볼트·스킬·에이전트 상태 진단
   llmwiki config path             설정 파일 경로 출력
   llmwiki config edit             $EDITOR로 설정 편집
+  llmwiki config export [--output <file>]        설정(볼트·스킬)을 JSON 번들로 내보내기
+  llmwiki config import <file> [--vaults-dir <dir>] [--force]  다른 머신의 설정 가져오기
 
 vault add 옵션:
-  --name <name> --path <path> [--kind open|secure]
+  --name <name> [--path <path>] [--kind open|secure]
+  [--backend local|git] [--origin <git-url>]
   [--signals <쉼표 구분 신호>] [--notes <메모>]
+
+볼트 백엔드:
+  local  이 머신의 폴더 (기본값)
+  git    git repo. --origin으로 clone하고(path 생략 시 ~/llmwiki-vaults/<name>),
+         llmwiki vault sync로 pull→commit→push해 여러 머신에서 같은 위키를 작업
 
 skill add 옵션:
   --description <설명>   에이전트가 언제 이 스킬을 쓸지 판단할 기준
@@ -115,12 +140,12 @@ capture 옵션:
   --title <제목>   메모 제목 (파일명 slug·frontmatter에 사용)
   --text <내용>    메모 본문 (미지정 시 TTY 프롬프트, 파이프면 stdin)
 
-원격 연동 (sync/inbox):
+원격 연동 (publish/inbox):
   볼트별 설정은 <vault>/_meta/remote.json에 둡니다 (토큰 제외, git 커밋).
-    { "provider": "notion", "sync": { "databaseId": "…" }, "inbox": { "databaseId": "…" }, "allowSync": false }
-  provider가 원격 대상을 결정합니다(현재 지원: notion). sync는 wiki/** 페이지를
-  단방향 push하고 상태는 <vault>/_meta/remote-map.json에 기록합니다.
-  secure 볼트는 allowSync: true 필요. Notion provider는 @notionhq/client가 필요합니다:
+    { "provider": "notion", "publish": { "databaseId": "…" }, "inbox": { "databaseId": "…" }, "allowPublish": false }
+  provider가 원격 대상을 결정합니다(현재 지원: notion). publish는 wiki/** 페이지를
+  단방향 push해 view를 발행하고 상태는 <vault>/_meta/remote-map.json에 기록합니다.
+  secure 볼트는 allowPublish: true 필요. Notion provider는 @notionhq/client가 필요합니다:
   npm i @notionhq/client
 
 환경 변수:
@@ -202,7 +227,7 @@ function inspectVault(vaultPath) {
   };
 }
 
-async function askVault(initial = {}, { edit = false } = {}) {
+async function askVault(paths, initial = {}, { edit = false } = {}) {
   if (!stdin.isTTY) {
     try {
       return normalizeVault(initial);
@@ -221,13 +246,45 @@ async function askVault(initial = {}, { edit = false } = {}) {
   });
   if (cancelPrompt(name)) return null;
 
-  const vaultPath = !edit && initial.path !== undefined ? initial.path : await p.text({
-    message: '볼트 경로',
-    placeholder: '~/wikis/personal',
-    initialValue: edit ? initial.path : undefined,
-    validate(value) { if (!value.trim()) return '볼트 경로는 필수입니다.'; },
-  });
-  if (cancelPrompt(vaultPath)) return null;
+  // 백엔드 선택. 편집 중이거나 addVault가 이미 확정한 경우(initial.backend)는 건너뛴다.
+  let backend = initial.backend;
+  if (backend === undefined && !edit) {
+    backend = await p.select({
+      message: '볼트 백엔드',
+      initialValue: 'local',
+      options: [
+        { value: 'local', label: 'Local', hint: '이 머신의 폴더' },
+        { value: 'git', label: 'Git', hint: 'git repo · llmwiki vault sync로 머신 간 공유' },
+      ],
+    });
+    if (cancelPrompt(backend)) return null;
+  }
+  backend = backend || 'local';
+
+  // git 백엔드: origin을 받아 기본 위치로 clone하고 path를 확정한다(이미 확정됐으면 재사용).
+  let vaultPath;
+  let origin = initial.origin || '';
+  if (backend === 'git' && !edit && initial.path === undefined) {
+    if (!origin) {
+      origin = await p.text({
+        message: 'git 원격 URL (origin)',
+        placeholder: 'git@github.com:me/wiki.git',
+        validate(value) { if (!value.trim()) return 'git 백엔드는 origin이 필요합니다.'; },
+      });
+      if (cancelPrompt(origin)) return null;
+    }
+    const provisioned = ensureGitVault(paths, { name, origin });
+    vaultPath = provisioned.path;
+    origin = provisioned.origin;
+  } else {
+    vaultPath = !edit && initial.path !== undefined ? initial.path : await p.text({
+      message: '볼트 경로',
+      placeholder: '~/wikis/personal',
+      initialValue: edit ? initial.path : undefined,
+      validate(value) { if (!value.trim()) return '볼트 경로는 필수입니다.'; },
+    });
+    if (cancelPrompt(vaultPath)) return null;
+  }
 
   const normalizedPath = normalizeVault({ name, path: vaultPath, kind: initial.kind || 'open' }).path;
   const status = inspectVault(normalizedPath);
@@ -263,14 +320,15 @@ async function askVault(initial = {}, { edit = false } = {}) {
   });
   if (cancelPrompt(notes)) return null;
 
-  const vault = normalizeVault({ name, path: vaultPath, kind, signals, notes });
-  p.note([
+  const vault = normalizeVault({ name, path: vaultPath, kind, backend, origin, signals, notes });
+  console.log(renderNote([
     `이름    ${vault.name}`,
     `경로    ${vault.path}`,
     `종류    ${vault.kind}`,
+    `백엔드  ${vault.backend}${vault.origin ? ` · ${vault.origin}` : ''}`,
     `신호    ${vault.signals || '없음'}`,
     `메모    ${vault.notes || '없음'}`,
-  ].join('\n'), '등록 내용');
+  ].join('\n'), '등록 내용'));
 
   const confirmed = await p.confirm({ message: '이 내용으로 저장할까요?', initialValue: true });
   if (cancelPrompt(confirmed) || !confirmed) {
@@ -284,11 +342,69 @@ function ensureRegistry(paths) {
   if (!fs.existsSync(paths.registry)) writeRegistry(paths.registry, []);
 }
 
+/**
+ * git backend 볼트의 로컬 저장소를 준비한다. 순수 등록 헬퍼(레지스트리는 건드리지 않음).
+ * - resolvedPath 미지정 시 기본 위치 paths.vaultsHome/<name>.
+ * - 대상이 이미 git repo면 그대로 쓰고, origin 미지정 시 remote에서 자동 채운다.
+ * - 아니면 origin으로 clone한다(origin 필수).
+ * 반환: { path, origin }.
+ */
+function ensureGitVault(paths, { name, resolvedPath, origin }) {
+  if (!isGitAvailable()) throw new Error('git backend 볼트를 쓰려면 git이 필요합니다. git을 설치하세요.');
+  const target = resolvedPath || path.join(paths.vaultsHome, name);
+
+  if (isGitRepo(target)) {
+    const actual = gitRemoteUrl(target);
+    // origin을 지정하지 않았으면 저장소의 실제 remote를 그대로 쓴다.
+    if (!origin) {
+      if (!actual) throw new Error(`${target}에 origin 원격이 없습니다. --origin으로 지정하세요.`);
+      return { path: target, origin: actual };
+    }
+    // origin을 지정했는데 저장소에 remote가 없으면 그 값으로 설정한다.
+    if (!actual) {
+      gitSetRemote(target, origin);
+      return { path: target, origin };
+    }
+    // 지정한 origin과 저장소의 실제 remote가 다르면, 등록 메타데이터가 실제 push/pull 대상과
+    // 어긋나므로 거부한다(잘못된 origin이 조용히 기록되는 것을 막는다).
+    if (actual !== origin) {
+      throw new Error(
+        `${target}의 실제 origin(${actual})이 지정한 --origin(${origin})과 다릅니다. `
+        + '일치시키거나 --origin을 생략해 실제 값을 쓰세요.',
+      );
+    }
+    return { path: target, origin };
+  }
+
+  if (!origin) throw new Error(`git backend 볼트는 origin(원격 URL)이 필요합니다.\n사용법: ${VAULT_ADD_USAGE}`);
+  if (fs.existsSync(target) && fs.readdirSync(target).length) {
+    throw new Error(`${target}가 비어 있지 않아 clone할 수 없습니다. 다른 --path를 쓰거나 정리하세요.`);
+  }
+  if (stdin.isTTY) p.log.step(`git clone ${origin} → ${target}`);
+  gitClone(origin, target);
+  return { path: target, origin };
+}
+
 async function addVault(paths, args, { outro = true, initial = {}, edit = false } = {}) {
   ensureRegistry(paths);
   const { options, rest } = parseOptions(args, { allowed: VAULT_OPTION_KEYS, usage: VAULT_ADD_USAGE });
   if (rest.length) throw new Error(`알 수 없는 인자: ${rest.join(' ')}\n사용법: ${VAULT_ADD_USAGE}`);
-  const vault = await askVault({ ...initial, ...options }, { edit });
+
+  const merged = { ...initial, ...options };
+  // git backend는 등록 전에 로컬 저장소를 준비(clone)하고 path/origin을 확정한다.
+  // 비-TTY이거나 옵션으로 backend=git이 넘어온 경우를 여기서 먼저 처리한다.
+  if (merged.backend === 'git' && !edit) {
+    if (!merged.name) throw new Error(`git backend 볼트는 --name이 필요합니다.\n사용법: ${VAULT_ADD_USAGE}`);
+    const provisioned = ensureGitVault(paths, {
+      name: merged.name,
+      resolvedPath: merged.path,
+      origin: merged.origin,
+    });
+    merged.path = provisioned.path;
+    merged.origin = provisioned.origin;
+  }
+
+  const vault = await askVault(paths, merged, { edit });
   if (!vault) return false;
   const vaults = readRegistry(paths.registry);
   const existing = vaults.findIndex((item) => item.name === vault.name);
@@ -371,15 +487,18 @@ function listVaults(paths, args = []) {
     p.intro(`llmwiki · 볼트 ${vaults.length}개`);
     for (const vault of vaults) {
       const status = inspectVault(vault.path);
-      p.note([
-        `${vault.kind} · ${status.exists ? '경로 정상' : '경로 없음'}`,
+      const backend = vault.backend === 'git' ? `git · ${vault.origin}` : vault.backend;
+      // p.note는 박스 폭을 문자열 길이로 계산해 CJK(2칸)·긴 URL에서 오른쪽 테두리가
+      // 틀어진다. displayWidth 기반의 renderNote로 같은 박스를 정렬 맞춰 그린다.
+      console.log(renderNote([
+        `${vault.kind} · ${backend} · ${status.exists ? '경로 정상' : '경로 없음'}`,
         vault.path,
         `신호: ${vault.signals || '없음'}`,
-      ].join('\n'), vault.name);
+      ].join('\n'), vault.name));
     }
     p.outro('상세 정보: llmwiki vault show <name>');
   } else {
-    console.table(vaults.map(({ name, path: vaultPath, kind, signals }) => ({ name, kind, path: vaultPath, signals })));
+    console.table(vaults.map(({ name, path: vaultPath, kind, backend, origin, signals }) => ({ name, kind, backend, origin, path: vaultPath, signals })));
   }
 }
 
@@ -402,6 +521,7 @@ function showVault(paths, name) {
   const details = [
     `이름       ${vault.name}`,
     `종류       ${vault.kind}`,
+    `백엔드     ${vault.backend}${vault.origin ? ` · ${vault.origin}` : ''}`,
     `경로       ${vault.path}`,
     `라우팅 신호 ${vault.signals || '없음'}`,
     `메모       ${vault.notes || '없음'}`,
@@ -410,7 +530,7 @@ function showVault(paths, name) {
     `AGENTS.md  ${status.agents ? '있음' : '없음'}`,
     `index.md   ${status.index ? '있음' : '없음'}`,
   ].join('\n');
-  if (stdin.isTTY) p.note(details, '볼트 상세');
+  if (stdin.isTTY) console.log(renderNote(details, '볼트 상세'));
   else console.log(details);
 }
 
@@ -516,6 +636,57 @@ function scaffoldVaults(paths, args = []) {
   }
 }
 
+// `llmwiki vault sync [name]`: git backend 볼트를 원격과 동기화한다(pull --rebase → commit → push).
+async function syncVault(paths, args = []) {
+  const { options, rest } = parseOptions(args, {
+    allowed: ['message', 'no-push', 'pull-only'],
+    booleans: ['no-push', 'pull-only'],
+    usage: VAULT_SYNC_USAGE,
+  });
+  if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${VAULT_SYNC_USAGE}`);
+
+  ensureRegistry(paths);
+  const vaults = readRegistry(paths.registry);
+  if (!vaults.length) throw new Error('등록된 볼트가 없습니다. 먼저 `llmwiki vault add`로 볼트를 등록하세요.');
+  const { vault, ambiguous } = resolveCaptureVault(vaults, rest[0]);
+  if (ambiguous) throw new Error(`대상 볼트를 지정하세요.\n사용법: ${VAULT_SYNC_USAGE}`);
+
+  if (vault.backend !== 'git') {
+    const message = `${vault.name}은 ${vault.backend} 백엔드라 sync 대상이 아닙니다. git 백엔드 볼트만 동기화합니다.`;
+    if (stdin.isTTY) p.log.info(message); else console.log(message);
+    return false;
+  }
+  if (!fs.existsSync(vault.path)) throw new Error(`볼트 경로를 찾을 수 없습니다: ${vault.path}`);
+  if (!isGitAvailable()) throw new Error('git이 필요합니다. git을 설치하세요.');
+  if (!isGitRepo(vault.path)) throw new Error(`${vault.path}는 git 저장소가 아닙니다. origin에서 clone됐는지 확인하세요.`);
+
+  const report = (level, message) => { if (stdin.isTTY) p.log[level](message); else console.log(message); };
+
+  // 1) pull --rebase. 단, 빈 원격에서 clone한 직후에는 추적 브랜치가 없어 pull이 실패한다.
+  //    이 경우 당겨올 것이 없으므로 건너뛰고 첫 커밋·push로 원격을 초기화한다.
+  if (hasUpstream(vault.path)) {
+    gitPullRebase(vault.path);
+    report('step', 'pull --rebase 완료');
+  } else {
+    report('step', '원격에 추적 브랜치가 없어 pull 생략 (첫 sync)');
+  }
+  if (options['pull-only']) { report('success', `vault sync 완료(pull-only) · ${vault.name}`); return true; }
+
+  // 2) commit
+  const now = new Date();
+  const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} `
+    + `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const message = options.message || `chore: llmwiki vault sync (${stamp})`;
+  const commit = gitAddCommit(vault.path, message);
+  report('step', commit.committed ? `commit 완료 · ${message}` : '변경 사항 없음 (commit 생략)');
+
+  // 3) push
+  if (options['no-push']) { report('success', `vault sync 완료(no-push) · ${vault.name}`); return true; }
+  gitPush(vault.path);
+  report('success', `vault sync 완료 · ${vault.name} → ${vault.origin}`);
+  return true;
+}
+
 function listAgents(paths, args = []) {
   const { options, rest } = parseOptions(args, { allowed: ['json'], booleans: ['json'], usage: 'llmwiki agent list [--json]' });
   if (rest.length) throw new Error(`알 수 없는 인자: ${rest.join(' ')}\n사용법: llmwiki agent list [--json]`);
@@ -537,7 +708,7 @@ function listAgents(paths, args = []) {
     return;
   }
   const lines = rows.map((row) => `${row.agent} → ${row.command}${row.default ? ' (기본값)' : ''} · add-dir ${row.addDir ? 'yes' : 'no'} · ${row.installed ? '실행 가능' : '명령 없음'}`);
-  if (stdin.isTTY) p.note(lines.join('\n'), 'llmwiki · 에이전트 실행 명령');
+  if (stdin.isTTY) console.log(renderNote(lines.join('\n'), 'llmwiki · 에이전트 실행 명령'));
   else for (const line of lines) console.log(line);
 }
 
@@ -620,11 +791,11 @@ function listSkillsCommand(paths, args = []) {
   if (stdin.isTTY) {
     p.intro(`llmwiki · 커스텀 스킬 ${skills.length}개`);
     for (const skill of skills) {
-      p.note([
+      console.log(renderNote([
         skill.description || '설명 없음',
         skill.dir,
         ...skill.issues.map((issue) => `⚠ ${issue}`),
-      ].join('\n'), skill.name);
+      ].join('\n'), skill.name));
     }
     p.outro('호출: Claude `/<name>` · Codex `<name>`');
   } else {
@@ -727,7 +898,7 @@ function showSkill(paths, name) {
     `호출   Claude /${skill.name} · Codex ${skill.name}`,
     `상태   ${skill.issues.length ? skill.issues.join(' / ') : '정상'}`,
   ].join('\n');
-  if (stdin.isTTY) p.note(details, '스킬 상세');
+  if (stdin.isTTY) console.log(renderNote(details, '스킬 상세'));
   else console.log(details);
 }
 
@@ -913,9 +1084,12 @@ function doctor(paths) {
     if (!vaults.length && !issues.length) add('warn', '볼트', '등록된 볼트 없음');
     for (const vault of vaults) {
       const status = inspectVault(vault.path);
+      const backendLabel = vault.backend === 'git' ? `git(${vault.origin})` : 'local';
       if (!status.exists) add('error', vault.name, `경로 없음 · ${vault.path}`);
-      else if (!status.claude) add('warn', vault.name, '경로 정상 · CLAUDE.md 없음');
-      else add('success', vault.name, `정상 · ${vault.kind} · index.md ${status.index ? '있음' : '없음'}`);
+      else if (vault.backend === 'git' && !isGitRepo(vault.path)) {
+        add('warn', vault.name, `git 백엔드지만 git 저장소가 아님 · ${vault.path}`);
+      } else if (!status.claude) add('warn', vault.name, `경로 정상 · CLAUDE.md 없음 · ${backendLabel}`);
+      else add('success', vault.name, `정상 · ${vault.kind} · ${backendLabel} · index.md ${status.index ? '있음' : '없음'}`);
     }
   }
 
@@ -1100,7 +1274,7 @@ function resolveRemoteVault(paths, requestedName, usage) {
 
 /**
  * 원격 설정을 읽고 provider를 해소한다. provider는 _meta/remote.json의 provider 값에서 추론한다.
- * kind는 'sync' | 'inbox' — 없으면 해당 기능이 설정되지 않은 것.
+ * kind는 'publish' | 'inbox' — 없으면 해당 기능이 설정되지 않은 것.
  */
 function resolveRemote(vault, kind) {
   const config = loadRemoteConfig(vault.path);
@@ -1116,26 +1290,26 @@ function parseLimit(options) {
   return limit;
 }
 
-// `llmwiki sync [vault]`: 로컬 위키를 원격(provider)으로 단방향 push한다.
-async function sync(paths, args) {
+// `llmwiki publish [vault]`: 로컬 위키를 원격(provider)으로 단방향 push해 view를 발행한다.
+async function publish(paths, args) {
   const { options, rest } = parseOptions(args, {
     allowed: ['limit', 'dry-run'],
     booleans: ['dry-run'],
-    usage: SYNC_USAGE,
+    usage: PUBLISH_USAGE,
   });
-  if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${SYNC_USAGE}`);
+  if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${PUBLISH_USAGE}`);
 
-  const vault = resolveRemoteVault(paths, rest[0], SYNC_USAGE);
-  const { config, provider } = resolveRemote(vault, 'sync');
+  const vault = resolveRemoteVault(paths, rest[0], PUBLISH_USAGE);
+  const { config, provider } = resolveRemote(vault, 'publish');
 
-  // secure 볼트는 명시적 allowSync 없이는 거부하고, TTY에서 확인·익명화 게이트를 거친다.
+  // secure 볼트는 명시적 allowPublish 없이는 거부하고, TTY에서 확인·익명화 게이트를 거친다.
   if (vault.kind === 'secure') {
-    if (!config.allowSync) {
-      throw new Error(`${vault.name}은 secure 볼트입니다. _meta/remote.json에 "allowSync": true를 설정해야 sync할 수 있습니다.`);
+    if (!config.allowPublish) {
+      throw new Error(`${vault.name}은 secure 볼트입니다. _meta/remote.json에 "allowPublish": true를 설정해야 발행할 수 있습니다.`);
     }
     if (stdin.isTTY) {
-      p.log.warn(`secure 볼트를 ${provider.name}에 push합니다. 고객명·자격증명·내부 URL이 익명화됐는지 확인하세요.`);
-      const accepted = await p.confirm({ message: `${vault.name}(secure)을 ${provider.name}으로 push할까요?`, initialValue: false });
+      p.log.warn(`secure 볼트를 ${provider.name}에 발행합니다. 고객명·자격증명·내부 URL이 익명화됐는지 확인하세요.`);
+      const accepted = await p.confirm({ message: `${vault.name}(secure)을 ${provider.name}으로 발행할까요?`, initialValue: false });
       if (cancelPrompt(accepted) || !accepted) return false;
     }
   }
@@ -1150,15 +1324,15 @@ async function sync(paths, args) {
   const summary = await pushSync(vault.path, {
     provider,
     client,
-    ctx: { databaseId: config.sync.databaseId, titleProp: config.sync.titleProperty },
-    subdirs: config.sync.syncedSubdirs || provider.defaultSyncSubdirs,
+    ctx: { databaseId: config.publish.databaseId, titleProp: config.publish.titleProperty },
+    subdirs: config.publish.syncedSubdirs || provider.defaultSyncSubdirs,
     dryRun,
     limit,
   });
 
   const message = dryRun
     ? `[dry-run] ${vault.name} → ${provider.name} · 생성 예정 ${summary.planned.create} · 갱신 예정 ${summary.planned.update} · 변경 없음 ${summary.unchanged}`
-    : `sync 완료 · ${vault.name} → ${provider.name} · 생성 ${summary.created} · 갱신 ${summary.updated} · 변경 없음 ${summary.unchanged}`;
+    : `publish 완료 · ${vault.name} → ${provider.name} · 생성 ${summary.created} · 갱신 ${summary.updated} · 변경 없음 ${summary.unchanged}`;
   if (stdin.isTTY) p.log.success(message);
   else console.log(message);
   return true;
@@ -1219,6 +1393,56 @@ function editConfig(paths) {
   openInEditor(paths.registry);
 }
 
+// `llmwiki config export [--output <file>]`: 볼트 레지스트리 + 스킬을 JSON 번들로 내보낸다.
+function exportConfig(paths, args) {
+  const { options, rest } = parseOptions(args, { allowed: ['output'], usage: CONFIG_EXPORT_USAGE });
+  if (rest.length) throw new Error(`알 수 없는 인자: ${rest.join(' ')}\n사용법: ${CONFIG_EXPORT_USAGE}`);
+  const stamp = new Date().toISOString().slice(0, 10);
+  const outFile = options.output || `llmwiki-settings-${stamp}.json`;
+  const written = writeExportBundle(paths, outFile);
+  const message = `설정 export 완료 · ${written} (볼트·스킬 포함, 토큰·에이전트 오버라이드 제외)`;
+  if (stdin.isTTY) p.log.success(message); else console.log(message);
+  return true;
+}
+
+// `llmwiki config import <file> [--vaults-dir <dir>] [--force]`: 번들에서 설정을 복원한다.
+async function importConfig(paths, args) {
+  const { options, rest } = parseOptions(args, {
+    allowed: ['vaults-dir', 'force'],
+    booleans: ['force'],
+    usage: CONFIG_IMPORT_USAGE,
+  });
+  const file = rest[0];
+  if (!file) throw new Error(`가져올 번들 파일이 필요합니다.\n사용법: ${CONFIG_IMPORT_USAGE}`);
+  if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${CONFIG_IMPORT_USAGE}`);
+
+  ensureRegistry(paths);
+  const bundle = readExportBundle(file);
+  const vaultsDir = options['vaults-dir'] || paths.vaultsHome;
+  const force = options.force === true;
+
+  // git 볼트 clone은 CLI 계층의 ensureGitVault에 위임한다(settings.js는 git에 의존하지 않음).
+  const provisionGitVault = (entry) => ensureGitVault(
+    { vaultsHome: vaultsDir },
+    { name: entry.name, origin: entry.origin },
+  );
+
+  const summary = applyImportBundle(paths, bundle, { force, provisionGitVault });
+
+  const lines = [
+    `스킬 복원 ${summary.skills.restored.length}${summary.skills.skipped.length ? ` · 스킵 ${summary.skills.skipped.length}(이미 있음, --force로 덮어쓰기)` : ''}`,
+    `git 볼트 clone ${summary.vaults.cloned.length}`,
+  ];
+  if (summary.vaults.skippedLocal.length) {
+    lines.push(`local 볼트 ${summary.vaults.skippedLocal.length}개는 경로를 알 수 없어 등록하지 않았습니다: ${summary.vaults.skippedLocal.join(', ')} (수동 재등록 필요)`);
+  }
+  for (const fail of summary.vaults.failed) lines.push(`볼트 ${fail.name} 실패: ${fail.reason}`);
+
+  const message = `설정 import 완료\n${lines.join('\n')}`;
+  if (stdin.isTTY) p.log.success(message); else console.log(message);
+  return true;
+}
+
 export async function main(args) {
   const paths = getPaths();
   const [command = 'start', ...rest] = args;
@@ -1244,9 +1468,9 @@ export async function main(args) {
     if (stdin.isTTY) p.intro('llmwiki · 메모 캡처');
     return capture(paths, rest);
   }
-  if (command === 'sync') {
-    if (stdin.isTTY) p.intro('llmwiki · Notion sync');
-    return sync(paths, rest);
+  if (command === 'publish') {
+    if (stdin.isTTY) p.intro('llmwiki · 원격 발행');
+    return publish(paths, rest);
   }
   if (command === 'inbox') {
     const [action, ...inboxArgs] = rest;
@@ -1267,7 +1491,8 @@ export async function main(args) {
     if (action === 'remove') return removeVault(paths, vaultArgs[0], { confirm: true });
     if (action === 'lint') return lintVaults(paths, vaultArgs);
     if (action === 'scaffold') return scaffoldVaults(paths, vaultArgs);
-    throw new Error('사용법: llmwiki vault <add|list|show|remove|lint|scaffold>');
+    if (action === 'sync') return syncVault(paths, vaultArgs);
+    throw new Error('사용법: llmwiki vault <add|list|show|remove|lint|scaffold|sync>');
   }
   if (command === 'agent' || command === 'agents') {
     const [action = 'list', name, ...commandTokens] = rest;
@@ -1291,10 +1516,15 @@ export async function main(args) {
     throw new Error('사용법: llmwiki skill <list|add|show|edit|remove|templates|path>');
   }
   if (command === 'config') {
-    const [action] = rest;
+    const [action, ...configArgs] = rest;
     if (action === 'path') return console.log(paths.registry);
     if (action === 'edit') return editConfig(paths);
-    throw new Error('사용법: llmwiki config <path|edit>');
+    if (action === 'export') return exportConfig(paths, configArgs);
+    if (action === 'import') {
+      if (stdin.isTTY) p.intro('llmwiki · 설정 가져오기');
+      return importConfig(paths, configArgs);
+    }
+    throw new Error('사용법: llmwiki config <path|edit|export|import>');
   }
   throw new Error(`알 수 없는 명령: ${command}\n\n${HELP}`);
 }

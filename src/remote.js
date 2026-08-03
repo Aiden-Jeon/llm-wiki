@@ -6,9 +6,9 @@ import path from 'node:path';
 //   {
 //     "version": 1,
 //     "provider": "notion",
-//     "sync":  { "databaseId": "…", "syncedSubdirs": ["wiki/entities", …] },
-//     "inbox": { "databaseId": "…" },
-//     "allowSync": false,
+//     "publish": { "databaseId": "…", "syncedSubdirs": ["wiki/entities", …] },
+//     "inbox":   { "databaseId": "…" },
+//     "allowPublish": false,
 //     "tokenEnv": "LLMWIKI_NOTION_TOKEN_PERSONAL"
 //   }
 // provider 필드가 어떤 원격 대상인지 결정한다(없으면 기본 'notion' — 첫 구현체).
