@@ -93,7 +93,7 @@ test('sync accepts --dry-run so it errors on config, not on the flag', async () 
   process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
   try {
     // --dry-run이 allowed에 없으면 "알 수 없는 옵션"으로 실패한다. 설정 부재 에러까지 도달해야 정상.
-    await assert.rejects(() => main(['sync', 'personal', '--dry-run']), /Notion sync 설정이 없습니다/);
+    await assert.rejects(() => main(['sync', 'personal', '--dry-run']), /원격 sync 설정이 없습니다/);
   } finally {
     if (prevConfig === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prevConfig;
     if (prevData === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prevData;

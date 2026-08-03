@@ -9,13 +9,13 @@
 ```text
 ① 입력 소스            ②  로컬 위키 (볼트)          ③ 원격 발행
 llmwiki new     ─┐
-llmwiki capture ─┼─▶  raw/ → wiki/ (Markdown)  ─▶  llmwiki sync ─▶ Notion
-llmwiki inbox pull ┘        정본은 로컬                 (local→notion 단방향)
+llmwiki capture ─┼─▶  raw/ → wiki/ (Markdown)  ─▶  llmwiki sync ─▶ 원격 (provider)
+llmwiki inbox pull ┘        정본은 로컬                 (local→원격 단방향)
 ```
 
-- **입력 소스** — 새 정보를 로컬 볼트로 받아오는 세 개의 독립 창구(`new` / `capture` / `inbox pull`). [자세히](#입력-소스)
+- **입력 소스** — 새 정보를 로컬 볼트로 받아오는 세 개의 독립 창구(`new` / `capture` / `inbox pull`). 앞으로 더 늘어날 수 있습니다. [자세히](#입력-소스)
 - **로컬 위키** — 볼트의 `raw/`·`wiki/` Markdown이 언제나 정본입니다.
-- **원격 발행** — `llmwiki sync`로 로컬 위키를 Notion에 단방향(local→notion)으로 동기화해 view로 보여줍니다. [자세히](#notion-sync-결과물-발행)
+- **원격 발행** — `llmwiki sync`로 로컬 위키를 원격 저장소에 단방향(local→원격)으로 동기화해 view로 보여줍니다. 원격 대상은 **provider**로 추상화되어 있어 현재 Notion을 지원하고 확장 가능합니다. [자세히](#원격-발행수집-sync--inbox)
 
 ## 설치
 
@@ -228,11 +228,13 @@ llmwiki inbox pull personal --dry-run           # Notion inbox 새 항목 미리
 
 - **`new`** 는 에이전트 세션을 열고 그 안에서 `wiki-add` 워크플로우를 시작하는 shortcut입니다. 분류·라우팅은 에이전트가 판단합니다.
 - **`capture`** 는 결정론적으로 메모를 `raw/notes/`에 저장합니다(타임스탬프 파일명). TTY에서는 프롬프트로, 파이프에서는 stdin으로 본문을 받습니다. 저장 후 바로 ingest할지 물어봅니다.
-- **`inbox pull`** 은 Notion inbox 데이터베이스의 새 항목을 `raw/notes/`로 가져오고, 이미 가져온 항목은 `_meta/notion-inbox.json`으로 중복을 막습니다.
+- **`inbox pull`** 은 원격 inbox의 새 항목을 `raw/notes/`로 가져오고, 이미 가져온 항목은 `_meta/remote-inbox.json`으로 중복을 막습니다.
 
-## Notion sync (결과물 발행)
+> `new`·`capture`는 로컬 전용이라 항상 쓸 수 있고, `inbox pull`은 원격 provider(아래) 설정이 필요합니다. 입력 창구는 앞으로 더 늘어날 수 있으며, 원격에서 가져오는 창구는 sync와 같은 provider 계층을 공유합니다.
 
-로컬에서 작업한 위키를 Notion에서 보여주기 위해 **단방향(local→notion)** 으로 push합니다.
+## 원격 발행/수집 (sync · inbox)
+
+로컬에서 작업한 위키를 원격 저장소에서 보여주기 위해 **단방향(local→원격)** 으로 push하고(`sync`), 원격 inbox에서 새 정보를 가져옵니다(`inbox pull`). 원격 대상은 **provider**로 추상화되어 있어, 지금은 Notion을 지원하고 앞으로 다른 대상을 파일 하나로 추가할 수 있습니다.
 
 ```bash
 export LLMWIKI_NOTION_TOKEN_PERSONAL=secret_xxx
@@ -240,19 +242,24 @@ llmwiki sync personal --dry-run   # diff 미리보기 (토큰 없이도 가능)
 llmwiki sync personal             # 없는/바뀐 페이지만 push
 ```
 
-- 볼트별 설정은 `<vault>/_meta/notion.json`에 둡니다(토큰 제외, git 커밋):
+- 볼트별 설정은 `<vault>/_meta/remote.json`에 둡니다(토큰 제외, git 커밋). `provider`가 원격 대상을 결정합니다:
   ```json
   {
     "version": 1,
+    "provider": "notion",
     "sync": { "databaseId": "…", "syncedSubdirs": ["wiki/entities", "wiki/concepts", "wiki/sources", "wiki/analyses"] },
     "inbox": { "databaseId": "…" },
     "allowSync": false
   }
   ```
-- **토큰은 환경 변수에만** 둡니다(파일·git 금지). 조회 순서: `notion.json`의 `tokenEnv` → `LLMWIKI_NOTION_TOKEN_<VAULT>` → `LLMWIKI_NOTION_TOKEN`.
-- 동기화 상태는 `_meta/notion-map.json`에 슬러그별 `notionPageId`·콘텐츠 해시로 기록합니다. 해시가 바뀐 페이지만 갱신하고, Notion→local 역방향이나 페이지 삭제는 하지 않습니다.
-- `kind: secure` 볼트는 `notion.json`에 `"allowSync": true`가 있어야 하고, push 전 확인·익명화 게이트를 거칩니다.
-- `@notionhq/client`는 선택 의존성이라 Notion 명령을 쓸 때만 필요합니다: `npm i @notionhq/client`.
+- **토큰은 환경 변수에만** 둡니다(파일·git 금지). 조회 순서: `remote.json`의 `tokenEnv` → `LLMWIKI_<PROVIDER>_TOKEN_<VAULT>` → `LLMWIKI_<PROVIDER>_TOKEN` (예: `LLMWIKI_NOTION_TOKEN_PERSONAL`).
+- 동기화 상태는 `_meta/remote-map.json`에 슬러그별 `remoteId`·콘텐츠 해시로 기록합니다. 해시가 바뀐 페이지만 갱신하고, 원격→local 역방향이나 원격 페이지 삭제는 하지 않습니다.
+- `kind: secure` 볼트는 `remote.json`에 `"allowSync": true`가 있어야 하고, push 전 확인·익명화 게이트를 거칩니다.
+- Notion provider는 `@notionhq/client`가 필요합니다(선택 의존성): `npm i @notionhq/client`.
+
+### 새 provider 추가
+
+원격 대상을 늘리려면 `src/providers/<name>.js`에 provider 인터페이스(`createClient`, 출력용 `createRemotePage`/`updateRemotePage`, 입력용 `listInboxItems`/`itemId`/`fetchInboxNote`)를 구현하고 `src/providers/index.js` 레지스트리에 한 줄 등록합니다. `sync`/`inbox` 오케스트레이터와 diff·상태 로직은 provider-중립이라 그대로 재사용됩니다. 볼트는 `remote.json`의 `provider` 값만 바꾸면 됩니다.
 
 ## 설계 원칙
 

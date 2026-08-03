@@ -2,14 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { parseWikiFrontmatter } from './lint.js';
-import { frontmatterToProperties, markdownToBlocks } from './notion.js';
 
-// local → Notion 단방향 동기화. diff를 떠 없는/바뀐 페이지만 push한다. 절대 notion→local 안 함.
-// 상태는 <vault>/_meta/notion-map.json에 슬러그별로 기록한다(git 커밋 대상).
+// local → 원격 단방향 동기화. diff를 떠 없는/바뀐 페이지만 push한다. 절대 원격→local 안 함.
+// 실제 원격 호출(페이지 생성·갱신)은 provider가 담당하고, 이 모듈은 스캔·diff·상태 기록만 한다.
+// 상태는 <vault>/_meta/remote-map.json에 슬러그별로 기록한다(git 커밋 대상, provider-중립).
 
-export const NOTION_MAP_FILE = path.join('_meta', 'notion-map.json');
-const DEFAULT_SUBDIRS = ['wiki/entities', 'wiki/concepts', 'wiki/sources', 'wiki/analyses'];
-const NOTION_BLOCK_LIMIT = 100; // children 추가 요청당 최대 블록 수.
+export const REMOTE_MAP_FILE = path.join('_meta', 'remote-map.json');
 
 // ── 로컬 페이지 스캔 ──────────────────────────────────────────────────────
 
@@ -27,7 +25,7 @@ function listMarkdown(dir) {
 /**
  * 동기화 대상 서브디렉터리의 wiki 페이지를 읽어 { slug, fields, body, file } 배열로 돌려준다.
  */
-export function scanLocalPages(vaultPath, subdirs = DEFAULT_SUBDIRS) {
+export function scanLocalPages(vaultPath, subdirs) {
   const pages = [];
   for (const subdir of subdirs) {
     for (const file of listMarkdown(path.join(vaultPath, subdir))) {
@@ -50,11 +48,11 @@ export function contentHash(fields, body) {
 }
 
 /**
- * 로컬 페이지와 매핑 스토어를 비교한다. 순수 함수.
- * - create: 매핑에 notionPageId가 없는 페이지
- * - update: notionPageId는 있으나 hash가 달라진 페이지
+ * 로컬 페이지와 매핑 스토어를 비교한다. 순수 함수. provider-중립.
+ * - create: 매핑에 remoteId가 없는 페이지
+ * - update: remoteId는 있으나 hash가 달라진 페이지
  * - unchanged: hash 일치
- * delete 브랜치는 없다(단방향, Notion 페이지를 지우지 않는다).
+ * delete 브랜치는 없다(단방향, 원격 페이지를 지우지 않는다).
  */
 export function computeSyncDiff(localPages, map) {
   const pages = (map && map.pages) || {};
@@ -63,8 +61,8 @@ export function computeSyncDiff(localPages, map) {
     const hash = contentHash(page.fields, page.body);
     const entry = pages[page.slug];
     const record = { ...page, hash };
-    if (!entry || !entry.notionPageId) result.create.push(record);
-    else if (entry.hash !== hash) result.update.push({ ...record, notionPageId: entry.notionPageId });
+    if (!entry || !entry.remoteId) result.create.push(record);
+    else if (entry.hash !== hash) result.update.push({ ...record, remoteId: entry.remoteId });
     else result.unchanged.push(record);
   }
   return result;
@@ -72,70 +70,33 @@ export function computeSyncDiff(localPages, map) {
 
 // ── 매핑 스토어 I/O ───────────────────────────────────────────────────────
 
-export function loadNotionMap(vaultPath) {
-  const file = path.join(vaultPath, NOTION_MAP_FILE);
+export function loadRemoteMap(vaultPath) {
+  const file = path.join(vaultPath, REMOTE_MAP_FILE);
   if (!fs.existsSync(file)) return { version: 1, pages: {} };
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return { version: parsed.version || 1, pages: parsed.pages || {} };
+    return { version: parsed.version || 1, provider: parsed.provider, pages: parsed.pages || {} };
   } catch (error) {
     throw new Error(`${file} 파싱 실패: ${error.message}`);
   }
 }
 
-export function saveNotionMap(vaultPath, map) {
-  const file = path.join(vaultPath, NOTION_MAP_FILE);
+export function saveRemoteMap(vaultPath, map) {
+  const file = path.join(vaultPath, REMOTE_MAP_FILE);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify(map, null, 2)}\n`);
-}
-
-// ── Notion 쓰기 (client 주입) ─────────────────────────────────────────────
-
-// 블록 배열을 100개 단위로 나눈다(Notion children 제한).
-export function chunkBlocks(blocks, size = NOTION_BLOCK_LIMIT) {
-  const chunks = [];
-  for (let i = 0; i < blocks.length; i += size) chunks.push(blocks.slice(i, i + size));
-  return chunks;
-}
-
-export async function createPage(client, databaseId, props, blocks) {
-  const [first, ...restChunks] = chunkBlocks(blocks);
-  const page = await client.pages.create({
-    parent: { database_id: databaseId },
-    properties: props,
-    children: first || [],
-  });
-  for (const chunk of restChunks) {
-    await client.blocks.children.append({ block_id: page.id, children: chunk });
-  }
-  return page.id;
-}
-
-/**
- * 기존 페이지를 갱신한다. Notion API는 블록 diff를 못 하므로 자식 블록을 모두 archive한 뒤
- * 다시 append한다(가장 단순·정확). 속성도 함께 갱신한다.
- */
-export async function replacePageBlocks(client, pageId, props, blocks) {
-  await client.pages.update({ page_id: pageId, properties: props });
-  const existing = await client.blocks.children.list({ block_id: pageId });
-  for (const child of existing.results || []) {
-    await client.blocks.delete({ block_id: child.id });
-  }
-  for (const chunk of chunkBlocks(blocks)) {
-    await client.blocks.children.append({ block_id: pageId, children: chunk });
-  }
 }
 
 // ── 오케스트레이터 ────────────────────────────────────────────────────────
 
 /**
- * diff를 계산하고 create/update를 push한 뒤 매핑 스토어를 갱신한다.
- * - vaultPath, databaseId, client는 필수. dryRun이면 네트워크 호출 없이 diff 요약만.
- * - subdirs, titleProp는 config에서 온다.
- * client는 DI로 주입하므로 테스트가 SDK 없이 스텁을 넘길 수 있다.
+ * diff를 계산하고 create/update를 provider로 push한 뒤 매핑 스토어를 갱신한다. provider-agnostic.
+ * - vaultPath, provider, ctx, subdirs는 필수(dryRun이면 provider/ctx 없이 diff 요약만).
+ * - provider.createRemotePage / updateRemotePage가 실제 원격 호출을 담당한다.
+ * - client는 DI로 주입하므로 테스트가 SDK 없이 스텁을 넘길 수 있다.
  */
-export async function pushSync(vaultPath, { client, databaseId, subdirs, titleProp = 'Name', dryRun = false, limit } = {}) {
-  const map = loadNotionMap(vaultPath);
+export async function pushSync(vaultPath, { provider, client, ctx = {}, subdirs, dryRun = false, limit } = {}) {
+  const map = loadRemoteMap(vaultPath);
   const local = scanLocalPages(vaultPath, subdirs);
   const diff = computeSyncDiff(local, map);
 
@@ -151,24 +112,24 @@ export async function pushSync(vaultPath, { client, databaseId, subdirs, titlePr
   if (dryRun) return summary;
 
   const now = new Date().toISOString().slice(0, 10);
+  if (provider.name) map.provider = provider.name;
   for (const page of targets) {
-    const props = frontmatterToProperties(page.fields, { titleProp });
-    const blocks = markdownToBlocks(page.body);
-    let notionPageId = page.notionPageId;
-    if (notionPageId) {
-      await replacePageBlocks(client, notionPageId, props, blocks);
+    const payload = { fields: page.fields, body: page.body };
+    let remoteId = page.remoteId;
+    if (remoteId) {
+      await provider.updateRemotePage(client, ctx, remoteId, payload);
       summary.updated += 1;
     } else {
-      notionPageId = await createPage(client, databaseId, props, blocks);
+      remoteId = await provider.createRemotePage(client, ctx, payload);
       summary.created += 1;
     }
     map.pages[page.slug] = {
-      notionPageId,
+      remoteId,
       hash: page.hash,
       syncedAt: now,
       title: page.fields.title || page.slug,
     };
   }
-  saveNotionMap(vaultPath, map);
+  saveRemoteMap(vaultPath, map);
   return summary;
 }

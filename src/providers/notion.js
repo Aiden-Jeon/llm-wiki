@@ -1,53 +1,18 @@
-import fs from 'node:fs';
-import path from 'node:path';
-
-// Notion 연동의 공유 계층: per-vault 설정(_meta/notion.json), 토큰 해소(env only),
-// 지연 로딩 클라이언트, 그리고 순수 변환 함수(markdown↔blocks, frontmatter→properties).
+// Notion 원격 provider 구현체. src/providers/index.js의 인터페이스를 채운다.
+// 순수 변환 함수(markdown↔blocks, frontmatter→properties)는 직접 단위 테스트하도록 export하고,
 // 네트워크 함수는 client를 인자로 받아(DI) 테스트가 SDK를 import하지 않게 한다.
 
-export const NOTION_CONFIG_FILE = path.join('_meta', 'notion.json');
+export const name = 'notion';
+export const tokenPrefix = 'NOTION';
+export const defaultSyncSubdirs = ['wiki/entities', 'wiki/concepts', 'wiki/sources', 'wiki/analyses'];
 
-/**
- * <vault>/_meta/notion.json을 읽는다. 없으면 null. 파싱 실패는 명확한 에러로 올린다.
- * 비밀(토큰)은 이 파일에 담지 않는다 — inbox/sync 대상 id, 동기화 서브디렉터리 등만.
- */
-export function loadNotionConfig(vaultPath) {
-  const file = path.join(vaultPath, NOTION_CONFIG_FILE);
-  if (!fs.existsSync(file)) return null;
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch (error) {
-    throw new Error(`${file} 파싱 실패: ${error.message}`);
-  }
-}
-
-/**
- * Notion 토큰을 환경 변수에서만 해소한다(파일·git·로그에 저장 금지).
- * 우선순위: config.tokenEnv → LLMWIKI_NOTION_TOKEN_<VAULT> → LLMWIKI_NOTION_TOKEN.
- * 볼트 이름은 대문자화하고 영숫자 외는 _로 바꾼다(personal-wiki → PERSONAL_WIKI).
- */
-export function resolveNotionToken(env, vaultName, config = null) {
-  const candidates = [];
-  if (config && config.tokenEnv) candidates.push(config.tokenEnv);
-  if (vaultName) {
-    const upper = vaultName.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-    candidates.push(`LLMWIKI_NOTION_TOKEN_${upper}`);
-  }
-  candidates.push('LLMWIKI_NOTION_TOKEN');
-  for (const key of candidates) {
-    const value = env[key];
-    if (value && value.trim()) return value.trim();
-  }
-  throw new Error(
-    `Notion 토큰을 찾을 수 없습니다. 다음 환경 변수 중 하나를 설정하세요: ${candidates.join(', ')}`,
-  );
-}
+const NOTION_BLOCK_LIMIT = 100; // children 추가 요청당 최대 블록 수(Notion 제한).
 
 /**
  * @notionhq/client를 지연 로딩해 클라이언트를 만든다. 코어 CLI가 이 선택 의존성에
  * 하드 링크되지 않도록 동적 import를 쓴다. 미설치 시 친절한 안내를 던진다.
  */
-export async function getNotionClient(token) {
+export async function createClient(token) {
   let mod;
   try {
     mod = await import('@notionhq/client');
@@ -164,7 +129,7 @@ export function markdownToBlocks(body) {
 // ── frontmatter → Notion database properties ──────────────────────────────
 
 function multiSelect(values) {
-  return { multi_select: (values || []).map((name) => ({ name: String(name) })) };
+  return { multi_select: (values || []).map((value) => ({ name: String(value) })) };
 }
 
 /**
@@ -185,7 +150,50 @@ export function frontmatterToProperties(fields, { titleProp = 'Name' } = {}) {
   return props;
 }
 
-// ── Notion 페이지 → raw 노트(마크다운) : inbox pull에서 사용 ─────────────────
+// 블록 배열을 100개 단위로 나눈다(Notion children 제한).
+export function chunkBlocks(blocks, size = NOTION_BLOCK_LIMIT) {
+  const chunks = [];
+  for (let i = 0; i < blocks.length; i += size) chunks.push(blocks.slice(i, i + size));
+  return chunks;
+}
+
+// ── 출력(sync) : provider 인터페이스 ──────────────────────────────────────
+
+/**
+ * 신규 Notion 페이지를 만든다. ctx = { databaseId, titleProp }. page = { fields, body }.
+ * 반환: 생성된 페이지 id(remoteId).
+ */
+export async function createRemotePage(client, ctx, page) {
+  const props = frontmatterToProperties(page.fields, { titleProp: ctx.titleProp });
+  const [first, ...restChunks] = chunkBlocks(markdownToBlocks(page.body));
+  const created = await client.pages.create({
+    parent: { database_id: ctx.databaseId },
+    properties: props,
+    children: first || [],
+  });
+  for (const chunk of restChunks) {
+    await client.blocks.children.append({ block_id: created.id, children: chunk });
+  }
+  return created.id;
+}
+
+/**
+ * 기존 페이지를 갱신한다. Notion API는 블록 diff를 못 하므로 자식 블록을 모두 삭제한 뒤
+ * 다시 append한다(가장 단순·정확). 속성도 함께 갱신한다.
+ */
+export async function updateRemotePage(client, ctx, remoteId, page) {
+  const props = frontmatterToProperties(page.fields, { titleProp: ctx.titleProp });
+  await client.pages.update({ page_id: remoteId, properties: props });
+  const existing = await client.blocks.children.list({ block_id: remoteId });
+  for (const child of existing.results || []) {
+    await client.blocks.delete({ block_id: child.id });
+  }
+  for (const chunk of chunkBlocks(markdownToBlocks(page.body))) {
+    await client.blocks.children.append({ block_id: remoteId, children: chunk });
+  }
+}
+
+// ── 입력(inbox) : provider 인터페이스 ─────────────────────────────────────
 
 function richTextToPlain(richText = []) {
   return richText.map((run) => run.plain_text ?? run.text?.content ?? '').join('');
@@ -219,29 +227,18 @@ export function extractNotionTitle(page) {
   return page.id;
 }
 
-/**
- * Notion 페이지 + (선택) 블록 목록을 raw 노트 재료로 바꾼다. 순수 함수.
- * blocks가 없으면 본문은 빈 문자열(제목만).
- */
-export function notionPageToRawNote(page, blocks = []) {
-  const created = (page.created_time || '').slice(0, 10);
-  return {
-    id: page.id,
-    title: extractNotionTitle(page),
-    createdAt: created,
-    markdown: blocks.map(blockToMarkdown).join('\n\n'),
-  };
+// inbox 항목의 안정 id(dedup 키).
+export function itemId(item) {
+  return item.id;
 }
 
-// ── 네트워크 (client 주입) ────────────────────────────────────────────────
-
-// 데이터베이스를 페이지네이션하며 모든 결과를 모은다.
-export async function queryDatabase(client, databaseId, { pageSize = 100 } = {}) {
+// 인박스 데이터베이스를 페이지네이션하며 모든 항목을 모은다. ctx = { databaseId }.
+export async function listInboxItems(client, ctx, { pageSize = 100 } = {}) {
   const results = [];
   let cursor;
   do {
     const response = await client.databases.query({
-      database_id: databaseId,
+      database_id: ctx.databaseId,
       start_cursor: cursor,
       page_size: pageSize,
     });
@@ -252,7 +249,7 @@ export async function queryDatabase(client, databaseId, { pageSize = 100 } = {})
 }
 
 // 한 블록(페이지)의 자식 블록을 페이지네이션하며 모두 모은다.
-export async function listBlockChildren(client, blockId, { pageSize = 100 } = {}) {
+async function listBlockChildren(client, blockId, { pageSize = 100 } = {}) {
   const results = [];
   let cursor;
   do {
@@ -265,4 +262,17 @@ export async function listBlockChildren(client, blockId, { pageSize = 100 } = {}
     cursor = response.has_more ? response.next_cursor : undefined;
   } while (cursor);
   return results;
+}
+
+/**
+ * 한 inbox 항목(Notion 페이지)을 raw 노트 재료로 바꾼다.
+ * 반환: { title, markdown, createdAt }.
+ */
+export async function fetchInboxNote(client, item) {
+  const blocks = await listBlockChildren(client, item.id);
+  return {
+    title: extractNotionTitle(item),
+    createdAt: (item.created_time || '').slice(0, 10),
+    markdown: blocks.map(blockToMarkdown).join('\n\n'),
+  };
 }

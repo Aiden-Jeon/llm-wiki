@@ -33,7 +33,9 @@ import {
   resolveCaptureVault,
   writeRawNote,
 } from './capture.js';
-import { getNotionClient, loadNotionConfig, resolveNotionToken } from './notion.js';
+import { loadRemoteConfig } from './remote.js';
+import { getProvider } from './providers/index.js';
+import { resolveRemoteToken } from './providers/token.js';
 import { pushSync } from './sync.js';
 import { pullInbox } from './inbox.js';
 
@@ -113,19 +115,20 @@ capture 옵션:
   --title <제목>   메모 제목 (파일명 slug·frontmatter에 사용)
   --text <내용>    메모 본문 (미지정 시 TTY 프롬프트, 파이프면 stdin)
 
-Notion 연동:
-  볼트별 설정은 <vault>/_meta/notion.json에 둡니다 (토큰 제외, git 커밋).
-    { "sync": { "databaseId": "…" }, "inbox": { "databaseId": "…" }, "allowSync": false }
-  sync는 대상 Notion 데이터베이스로 wiki/** 페이지를 단방향 push하고,
-  상태는 <vault>/_meta/notion-map.json에 기록합니다. secure 볼트는 allowSync: true 필요.
-  @notionhq/client는 선택 의존성입니다: npm i @notionhq/client
+원격 연동 (sync/inbox):
+  볼트별 설정은 <vault>/_meta/remote.json에 둡니다 (토큰 제외, git 커밋).
+    { "provider": "notion", "sync": { "databaseId": "…" }, "inbox": { "databaseId": "…" }, "allowSync": false }
+  provider가 원격 대상을 결정합니다(현재 지원: notion). sync는 wiki/** 페이지를
+  단방향 push하고 상태는 <vault>/_meta/remote-map.json에 기록합니다.
+  secure 볼트는 allowSync: true 필요. Notion provider는 @notionhq/client가 필요합니다:
+  npm i @notionhq/client
 
 환경 변수:
   LLM_WIKI_AGENT       기본 에이전트 (claude 또는 codex)
   LLM_WIKI_CONFIG_HOME 설정 디렉터리 재정의
   LLM_WIKI_DATA_HOME   런타임 데이터 디렉터리 재정의
-  LLMWIKI_NOTION_TOKEN            Notion 토큰 (모든 볼트 공통 폴백)
-  LLMWIKI_NOTION_TOKEN_<VAULT>    볼트별 Notion 토큰 (예: LLMWIKI_NOTION_TOKEN_PERSONAL)`;
+  LLMWIKI_<PROVIDER>_TOKEN          원격 토큰 (모든 볼트 공통 폴백, 예: LLMWIKI_NOTION_TOKEN)
+  LLMWIKI_<PROVIDER>_TOKEN_<VAULT>  볼트별 원격 토큰 (예: LLMWIKI_NOTION_TOKEN_PERSONAL)`;
 
 export function parseOptions(args, { allowed, booleans = [], usage } = {}) {
   const options = {};
@@ -1082,10 +1085,10 @@ async function capture(paths, args) {
 }
 
 /**
- * Notion 명령(sync/inbox)이 대상 볼트를 해소한다. positional 이름 우선, 없으면 단일 볼트.
- * 여러 볼트인데 이름이 없으면 에러(Notion 쓰기는 정확히 한 볼트로 해소한다).
+ * 원격 명령(sync/inbox)이 대상 볼트를 해소한다. positional 이름 우선, 없으면 단일 볼트.
+ * 여러 볼트인데 이름이 없으면 에러(원격 쓰기는 정확히 한 볼트로 해소한다).
  */
-function resolveNotionVault(paths, requestedName, usage) {
+function resolveRemoteVault(paths, requestedName, usage) {
   ensureRegistry(paths);
   const vaults = readRegistry(paths.registry);
   if (!vaults.length) throw new Error('등록된 볼트가 없습니다. 먼저 `llmwiki vault add`로 볼트를 등록하세요.');
@@ -1095,7 +1098,25 @@ function resolveNotionVault(paths, requestedName, usage) {
   return vault;
 }
 
-// `llmwiki sync [vault]`: 로컬 위키를 Notion 데이터베이스로 단방향 push한다.
+/**
+ * 원격 설정을 읽고 provider를 해소한다. provider는 _meta/remote.json의 provider 값에서 추론한다.
+ * kind는 'sync' | 'inbox' — 없으면 해당 기능이 설정되지 않은 것.
+ */
+function resolveRemote(vault, kind) {
+  const config = loadRemoteConfig(vault.path);
+  if (!config || !config[kind] || !config[kind].databaseId) {
+    throw new Error(`${vault.name} 볼트에 원격 ${kind} 설정이 없습니다. _meta/remote.json의 provider와 ${kind}.databaseId를 설정하세요.`);
+  }
+  return { config, provider: getProvider(config.provider) };
+}
+
+function parseLimit(options) {
+  const limit = options.limit ? Number.parseInt(options.limit, 10) : undefined;
+  if (options.limit && (!Number.isInteger(limit) || limit <= 0)) throw new Error('--limit은 양의 정수여야 합니다.');
+  return limit;
+}
+
+// `llmwiki sync [vault]`: 로컬 위키를 원격(provider)으로 단방향 push한다.
 async function sync(paths, args) {
   const { options, rest } = parseOptions(args, {
     allowed: ['limit', 'dry-run'],
@@ -1104,48 +1125,46 @@ async function sync(paths, args) {
   });
   if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${SYNC_USAGE}`);
 
-  const vault = resolveNotionVault(paths, rest[0], SYNC_USAGE);
-  const config = loadNotionConfig(vault.path);
-  if (!config || !config.sync || !config.sync.databaseId) {
-    throw new Error(`${vault.name} 볼트에 Notion sync 설정이 없습니다. _meta/notion.json의 sync.databaseId를 설정하세요.`);
-  }
+  const vault = resolveRemoteVault(paths, rest[0], SYNC_USAGE);
+  const { config, provider } = resolveRemote(vault, 'sync');
 
   // secure 볼트는 명시적 allowSync 없이는 거부하고, TTY에서 확인·익명화 게이트를 거친다.
   if (vault.kind === 'secure') {
     if (!config.allowSync) {
-      throw new Error(`${vault.name}은 secure 볼트입니다. _meta/notion.json에 "allowSync": true를 설정해야 sync할 수 있습니다.`);
+      throw new Error(`${vault.name}은 secure 볼트입니다. _meta/remote.json에 "allowSync": true를 설정해야 sync할 수 있습니다.`);
     }
     if (stdin.isTTY) {
-      p.log.warn('secure 볼트를 Notion에 push합니다. 고객명·자격증명·내부 URL이 익명화됐는지 확인하세요.');
-      const accepted = await p.confirm({ message: `${vault.name}(secure)을 Notion으로 push할까요?`, initialValue: false });
+      p.log.warn(`secure 볼트를 ${provider.name}에 push합니다. 고객명·자격증명·내부 URL이 익명화됐는지 확인하세요.`);
+      const accepted = await p.confirm({ message: `${vault.name}(secure)을 ${provider.name}으로 push할까요?`, initialValue: false });
       if (cancelPrompt(accepted) || !accepted) return false;
     }
   }
 
   const dryRun = options['dry-run'] === true;
-  const limit = options.limit ? Number.parseInt(options.limit, 10) : undefined;
-  if (options.limit && (!Number.isInteger(limit) || limit <= 0)) throw new Error('--limit은 양의 정수여야 합니다.');
+  const limit = parseLimit(options);
 
   // 토큰·클라이언트는 dry-run이 아닐 때만 필요하다(오프라인에서 diff 미리보기 가능).
-  const client = dryRun ? null : await getNotionClient(resolveNotionToken(process.env, vault.name, config));
+  const client = dryRun
+    ? null
+    : await provider.createClient(resolveRemoteToken(process.env, { prefix: provider.tokenPrefix, vaultName: vault.name, config }));
   const summary = await pushSync(vault.path, {
+    provider,
     client,
-    databaseId: config.sync.databaseId,
-    subdirs: config.sync.syncedSubdirs,
-    titleProp: config.sync.titleProperty,
+    ctx: { databaseId: config.sync.databaseId, titleProp: config.sync.titleProperty },
+    subdirs: config.sync.syncedSubdirs || provider.defaultSyncSubdirs,
     dryRun,
     limit,
   });
 
   const message = dryRun
-    ? `[dry-run] ${vault.name} · 생성 예정 ${summary.planned.create} · 갱신 예정 ${summary.planned.update} · 변경 없음 ${summary.unchanged}`
-    : `sync 완료 · ${vault.name} · 생성 ${summary.created} · 갱신 ${summary.updated} · 변경 없음 ${summary.unchanged}`;
+    ? `[dry-run] ${vault.name} → ${provider.name} · 생성 예정 ${summary.planned.create} · 갱신 예정 ${summary.planned.update} · 변경 없음 ${summary.unchanged}`
+    : `sync 완료 · ${vault.name} → ${provider.name} · 생성 ${summary.created} · 갱신 ${summary.updated} · 변경 없음 ${summary.unchanged}`;
   if (stdin.isTTY) p.log.success(message);
   else console.log(message);
   return true;
 }
 
-// `llmwiki inbox pull [vault]`: Notion inbox 데이터베이스의 새 항목을 raw/notes/로 가져온다.
+// `llmwiki inbox pull [vault]`: 원격 inbox의 새 항목을 raw/notes/로 가져온다.
 async function inboxPull(paths, args) {
   const { options, rest } = parseOptions(args, {
     allowed: ['limit', 'dry-run'],
@@ -1154,22 +1173,26 @@ async function inboxPull(paths, args) {
   });
   if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${INBOX_USAGE}`);
 
-  const vault = resolveNotionVault(paths, rest[0], INBOX_USAGE);
-  const config = loadNotionConfig(vault.path);
-  if (!config || !config.inbox || !config.inbox.databaseId) {
-    throw new Error(`${vault.name} 볼트에 Notion inbox 설정이 없습니다. _meta/notion.json의 inbox.databaseId를 설정하세요.`);
-  }
+  const vault = resolveRemoteVault(paths, rest[0], INBOX_USAGE);
+  const { config, provider } = resolveRemote(vault, 'inbox');
 
   const dryRun = options['dry-run'] === true;
-  const limit = options.limit ? Number.parseInt(options.limit, 10) : undefined;
-  if (options.limit && (!Number.isInteger(limit) || limit <= 0)) throw new Error('--limit은 양의 정수여야 합니다.');
+  const limit = parseLimit(options);
 
-  const client = await getNotionClient(resolveNotionToken(process.env, vault.name, config));
-  const result = await pullInbox(vault.path, { client, databaseId: config.inbox.databaseId, dryRun, limit });
+  const client = await provider.createClient(
+    resolveRemoteToken(process.env, { prefix: provider.tokenPrefix, vaultName: vault.name, config }),
+  );
+  const result = await pullInbox(vault.path, {
+    provider,
+    client,
+    ctx: { databaseId: config.inbox.databaseId },
+    dryRun,
+    limit,
+  });
 
   const message = dryRun
-    ? `[dry-run] ${vault.name} · 가져올 항목 ${result.pulled.length} · 이미 있음 ${result.skipped}`
-    : `inbox pull 완료 · ${vault.name} · 가져옴 ${result.pulled.length} · 이미 있음 ${result.skipped}`;
+    ? `[dry-run] ${vault.name} ← ${provider.name} · 가져올 항목 ${result.pulled.length} · 이미 있음 ${result.skipped}`
+    : `inbox pull 완료 · ${vault.name} ← ${provider.name} · 가져옴 ${result.pulled.length} · 이미 있음 ${result.skipped}`;
   if (stdin.isTTY) p.log.success(message);
   else console.log(message);
   return true;

@@ -4,10 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  chunkBlocks,
   computeSyncDiff,
   contentHash,
-  loadNotionMap,
+  loadRemoteMap,
   pushSync,
   scanLocalPages,
 } from '../src/sync.js';
@@ -30,6 +29,16 @@ function writePage(vault, subdir, slug, fields, body = 'content') {
 
 const BASE_FIELDS = { title: 'RAG', type: 'concept', status: 'active', created: '2024-01-01', updated: '2024-01-01', tags: ['llm'], sources: [] };
 
+// diff·상태만 검증하는 최소 스텁 provider.
+function stubProvider(calls = { create: 0, update: 0 }) {
+  return {
+    name: 'stub',
+    calls,
+    async createRemotePage() { calls.create += 1; return `remote-${calls.create}`; },
+    async updateRemotePage() { calls.update += 1; },
+  };
+}
+
 test('contentHash is stable regardless of frontmatter key order', () => {
   const a = contentHash({ title: 'X', type: 'concept' }, 'body');
   const b = contentHash({ type: 'concept', title: 'X' }, 'body');
@@ -45,15 +54,15 @@ test('computeSyncDiff classifies create/update/unchanged with no delete branch',
   ];
   const map = {
     pages: {
-      changed: { notionPageId: 'id-c', hash: contentHash({ title: 'C' }, 'old body') },
-      same: { notionPageId: 'id-s', hash: contentHash({ title: 'S' }, 'same body') },
+      changed: { remoteId: 'id-c', hash: contentHash({ title: 'C' }, 'old body') },
+      same: { remoteId: 'id-s', hash: contentHash({ title: 'S' }, 'same body') },
     },
   };
   const diff = computeSyncDiff(pages, map);
   assert.deepEqual(diff.create.map((p) => p.slug), ['new-page']);
   assert.deepEqual(diff.update.map((p) => p.slug), ['changed']);
   assert.deepEqual(diff.unchanged.map((p) => p.slug), ['same']);
-  assert.equal(diff.update[0].notionPageId, 'id-c');
+  assert.equal(diff.update[0].remoteId, 'id-c');
 });
 
 test('scanLocalPages reads only the given subdirs', () => {
@@ -64,63 +73,39 @@ test('scanLocalPages reads only the given subdirs', () => {
   assert.deepEqual(pages.map((p) => p.slug), ['rag']);
 });
 
-test('chunkBlocks splits at the 100-block limit', () => {
-  const blocks = Array.from({ length: 250 }, (_, i) => i);
-  const chunks = chunkBlocks(blocks);
-  assert.deepEqual(chunks.map((c) => c.length), [100, 100, 50]);
-});
-
 test('pushSync --dry-run reports the plan and writes nothing', async () => {
   const vault = tmpVault();
   writePage(vault, 'wiki/concepts', 'rag', BASE_FIELDS);
-  const summary = await pushSync(vault, { databaseId: 'db', subdirs: ['wiki/concepts'], dryRun: true });
+  const summary = await pushSync(vault, { provider: stubProvider(), subdirs: ['wiki/concepts'], dryRun: true });
   assert.equal(summary.planned.create, 1);
   assert.equal(summary.created, 0);
-  assert.ok(!fs.existsSync(path.join(vault, '_meta', 'notion-map.json')));
+  assert.ok(!fs.existsSync(path.join(vault, '_meta', 'remote-map.json')));
 });
 
-test('pushSync creates pages via the injected client and records the mapping', async () => {
+test('pushSync creates pages via the provider and records the mapping', async () => {
   const vault = tmpVault();
   writePage(vault, 'wiki/concepts', 'rag', BASE_FIELDS);
-  const calls = { create: 0, update: 0 };
-  const client = {
-    pages: {
-      create: async () => { calls.create += 1; return { id: 'notion-1' }; },
-      update: async () => { calls.update += 1; },
-    },
-    blocks: { children: { append: async () => {}, list: async () => ({ results: [] }) }, delete: async () => {} },
-  };
-  const summary = await pushSync(vault, { client, databaseId: 'db', subdirs: ['wiki/concepts'] });
+  const provider = stubProvider();
+  const summary = await pushSync(vault, { provider, client: {}, ctx: { databaseId: 'db' }, subdirs: ['wiki/concepts'] });
   assert.equal(summary.created, 1);
-  assert.equal(calls.create, 1);
-  const map = loadNotionMap(vault);
-  assert.equal(map.pages.rag.notionPageId, 'notion-1');
+  assert.equal(provider.calls.create, 1);
+  const map = loadRemoteMap(vault);
+  assert.equal(map.provider, 'stub');
+  assert.equal(map.pages.rag.remoteId, 'remote-1');
   assert.match(map.pages.rag.hash, /^sha256:/);
 });
 
-test('pushSync updates a changed page by replacing its blocks', async () => {
+test('pushSync updates a changed page and rewrites the stored hash', async () => {
   const vault = tmpVault();
   writePage(vault, 'wiki/concepts', 'rag', BASE_FIELDS, 'v2 body');
-  // 이전 sync 기록: 다른 hash로 두어 update 브랜치를 태운다.
   fs.mkdirSync(path.join(vault, '_meta'), { recursive: true });
-  fs.writeFileSync(path.join(vault, '_meta', 'notion-map.json'), JSON.stringify({
+  fs.writeFileSync(path.join(vault, '_meta', 'remote-map.json'), JSON.stringify({
     version: 1,
-    pages: { rag: { notionPageId: 'notion-1', hash: 'sha256:old', syncedAt: '2024-01-01', title: 'RAG' } },
+    pages: { rag: { remoteId: 'remote-1', hash: 'sha256:old', syncedAt: '2024-01-01', title: 'RAG' } },
   }));
-  const calls = { update: 0, deleted: 0, appended: 0 };
-  const client = {
-    pages: { create: async () => ({ id: 'x' }), update: async () => { calls.update += 1; } },
-    blocks: {
-      children: {
-        append: async () => { calls.appended += 1; },
-        list: async () => ({ results: [{ id: 'old-block' }] }),
-      },
-      delete: async () => { calls.deleted += 1; },
-    },
-  };
-  const summary = await pushSync(vault, { client, databaseId: 'db', subdirs: ['wiki/concepts'] });
+  const provider = stubProvider();
+  const summary = await pushSync(vault, { provider, client: {}, ctx: { databaseId: 'db' }, subdirs: ['wiki/concepts'] });
   assert.equal(summary.updated, 1);
-  assert.equal(calls.update, 1);
-  assert.equal(calls.deleted, 1);
-  assert.equal(loadNotionMap(vault).pages.rag.hash, contentHash({ ...BASE_FIELDS }, 'v2 body'));
+  assert.equal(provider.calls.update, 1);
+  assert.equal(loadRemoteMap(vault).pages.rag.hash, contentHash({ ...BASE_FIELDS }, 'v2 body'));
 });

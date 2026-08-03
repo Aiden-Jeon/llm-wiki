@@ -42,14 +42,15 @@ secure 볼트로 쓰기가 해소되면:
 - (a) 사용자에게 확인한다.
 - (b) `cd <vault path>`로 재-앵커하여 그 볼트 `CLAUDE.md`의 **보안 원칙**(private 유지, 고객명·자격증명·내부 URL 미저장, 사례 익명화 등)이 in-context 로드된 뒤 쓴다.
 
-금지: 볼트 간 raw 내용 이동. 한 볼트의 Notion 토큰/대상을 다른 볼트 내용에 사용. 단일 호출로 여러 볼트에 동시 Notion 쓰기(토큰·API 버전이 다를 수 있음).
+금지: 볼트 간 raw 내용 이동. 한 볼트의 원격 토큰/대상을 다른 볼트 내용에 사용. 단일 호출로 여러 볼트에 동시 원격 쓰기(토큰·API 버전이 다를 수 있음).
 
-Notion 연동(`llmwiki sync`, `llmwiki inbox pull`)의 결정론 규칙:
+원격 연동(`llmwiki sync`, `llmwiki inbox pull`)의 결정론 규칙:
 
+- **provider로 추상화.** 원격 대상은 `_meta/remote.json`의 `provider` 값으로 결정한다(현재 지원: `notion`). 새 대상은 `src/providers/<name>.js` 구현 + 레지스트리 등록으로 붙고, orchestrator·diff·보안 규칙은 provider-중립으로 공유된다.
 - **호출당 정확히 한 볼트.** `sync`/`inbox`는 대상 볼트를 하나로 해소하고 그 볼트의 토큰·대상만 쓴다("sync all" 없음).
-- **토큰은 환경 변수에만.** 마크다운 레지스트리나 git에 저장하지 않는다. 조회 순서: `_meta/notion.json`의 `tokenEnv` → `LLMWIKI_NOTION_TOKEN_<VAULT>` → `LLMWIKI_NOTION_TOKEN`.
-- **비밀 아닌 설정만 커밋.** `_meta/notion.json`(대상 database id, 동기화 서브디렉터리)과 상태 파일(`_meta/notion-map.json`, `_meta/notion-inbox.json`)은 git 커밋 대상이다.
-- **`kind: secure` 볼트 sync는 명시적 opt-in.** `_meta/notion.json`에 `"allowSync": true`가 없으면 거부하고, 첫 push 전 확인·익명화 게이트를 거친다.
+- **토큰은 환경 변수에만.** 마크다운 레지스트리나 git에 저장하지 않는다. 조회 순서: `_meta/remote.json`의 `tokenEnv` → `LLMWIKI_<PROVIDER>_TOKEN_<VAULT>` → `LLMWIKI_<PROVIDER>_TOKEN`.
+- **비밀 아닌 설정만 커밋.** `_meta/remote.json`(provider, 대상 id, 동기화 서브디렉터리)과 상태 파일(`_meta/remote-map.json`, `_meta/remote-inbox.json`)은 git 커밋 대상이다.
+- **`kind: secure` 볼트 sync는 명시적 opt-in.** `_meta/remote.json`에 `"allowSync": true`가 없으면 거부하고, 첫 push 전 확인·익명화 게이트를 거친다.
 
 ## 명령 카탈로그
 
@@ -98,11 +99,11 @@ Notion 연동(`llmwiki sync`, `llmwiki inbox pull`)의 결정론 규칙:
 
 - **`llmwiki new <입력>`** — 에이전트를 띄우고 그 세션에서 ingest(`wiki-add`) 워크플로우를 시작하는 shortcut이다. 입력은 URL/파일 경로/자유 텍스트. 라우팅·분류는 에이전트가 판단한다. 기본 `claude`/`codex`에는 초기 프롬프트를 주입하고, 커스텀 오버라이드 명령은 붙여넣을 프롬프트를 안내만 한다.
 - **`llmwiki capture`** — 자유 텍스트 메모를 결정론적으로 대상 볼트의 `raw/notes/`에 저장한다(타임스탬프 파일명 + 최소 frontmatter). 저장 후 곧바로 ingest할지 물어본다. 대상은 `--vault`로 지정하거나 단일 볼트면 자동, 여러 개면 선택/에러. `kind: secure` 볼트 쓰기는 확인·익명화 게이트를 거친다.
-- **`llmwiki inbox pull [vault]`** — Notion inbox 데이터베이스의 새 항목을 결정론적으로 `raw/notes/`로 가져온다. 이미 가져온 항목은 `_meta/notion-inbox.json`으로 중복을 막는다. 설정·토큰·보안은 `§ 보안 경계`의 Notion 규칙을 따른다.
+- **`llmwiki inbox pull [vault]`** — 원격 inbox의 새 항목을 결정론적으로 `raw/notes/`로 가져온다. 이미 가져온 항목은 `_meta/remote-inbox.json`으로 중복을 막는다. 원격 대상은 provider로 추상화되며(현재 Notion), 설정·토큰·보안은 `§ 보안 경계`의 원격 연동 규칙을 따른다. 입력 창구는 앞으로 더 늘어날 수 있다.
 
 ## 결과물 sync (터미널 명령)
 
-- **`llmwiki sync [vault] [--dry-run] [--limit <n>]`** — 로컬 위키(`wiki/**`)를 대상 Notion 데이터베이스로 **단방향(local→notion)** push한다. diff를 떠 매핑에 없는 페이지는 생성, 콘텐츠 해시가 바뀐 페이지는 갱신하며, Notion→local이나 Notion 페이지 삭제는 하지 않는다. 상태는 `_meta/notion-map.json`에 슬러그별 `notionPageId`·`hash`로 기록한다. `--dry-run`은 토큰 없이 diff 요약만 낸다. 설정·토큰·보안은 `§ 보안 경계`의 Notion 규칙을 따른다.
+- **`llmwiki sync [vault] [--dry-run] [--limit <n>]`** — 로컬 위키(`wiki/**`)를 원격 대상으로 **단방향(local→원격)** push한다. diff를 떠 매핑에 없는 페이지는 생성, 콘텐츠 해시가 바뀐 페이지는 갱신하며, 원격→local이나 원격 페이지 삭제는 하지 않는다. 상태는 `_meta/remote-map.json`에 슬러그별 `remoteId`·`hash`로 기록한다. `--dry-run`은 토큰 없이 diff 요약만 낸다. 원격 대상은 `_meta/remote.json`의 `provider`로 결정하며(현재 Notion), 설정·토큰·보안은 `§ 보안 경계`의 원격 연동 규칙을 따른다.
 
 ## 커스텀 스킬
 
