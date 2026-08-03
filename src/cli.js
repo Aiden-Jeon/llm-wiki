@@ -44,7 +44,7 @@ const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운영합�
   llmwiki vault show <name>       볼트 상세 정보 및 상태
   llmwiki vault remove <name>     볼트 제거
   llmwiki agent list [--json]     에이전트 실행 명령 매핑 확인
-  llmwiki agent set <name> [--add-dir] <cmd>  claude/codex를 다른 명령으로 실행
+  llmwiki agent set <name> [--add-dir] <cmd> [-- <명령 인자>]  claude/codex를 다른 명령으로 실행
   llmwiki agent reset <name>      실행 명령을 기본값(claude/codex)으로 복원
   llmwiki skill list [--json]     등록된 커스텀 스킬 목록
   llmwiki skill add <name>        커스텀 스킬 생성/가져오기
@@ -83,6 +83,8 @@ skill add 옵션:
     llmwiki agent set codex dbexec repo run isaac
   기본적으로 커스텀 명령에는 볼트 --add-dir 인자를 붙이지 않습니다(vibe 등은 이 플래그를
   받지 않음). claude/codex 원본처럼 --add-dir를 붙이려면 --add-dir 플래그를 추가하세요.
+  실행 명령 자체가 --add-dir 같은 대시 옵션을 받아야 하면 -- 뒤에 두세요:
+    llmwiki agent set codex mycli -- --add-dir .   (-- 뒤는 그대로 명령 인자로 보존)
   --add-dir를 안 붙이는 경우에도 등록된 볼트는 워크스페이스의 vaults/ 심볼릭 링크로 노출됩니다.
   매핑은 설정 파일(llmwiki config path)에 저장됩니다.
 
@@ -417,11 +419,15 @@ function listAgents(paths, args = []) {
 }
 
 // set 명령의 인자에서 --add-dir/--no-add-dir 플래그만 뽑아내고 나머지는 명령 토큰으로 둔다.
-// 명령 자체(dbexec repo run isaac 등)에는 대개 대시 옵션이 없으므로 안전하다.
-function extractAddDirFlag(tokens) {
+// `--` 뒤는 경계로 취급해 그대로 명령 토큰으로 보존한다. 실행 명령 자체가 --add-dir 같은
+// 대시 옵션을 받아야 하는 경우 `llmwiki agent set codex mycli -- --add-dir` 처럼 넘긴다.
+export function extractAddDirFlag(tokens) {
   const command = [];
   let addDir; // 미지정
+  let literal = false;
   for (const token of tokens) {
+    if (literal) { command.push(token); continue; }
+    if (token === '--') { literal = true; continue; }
     if (token === '--add-dir') addDir = true;
     else if (token === '--no-add-dir') addDir = false;
     else command.push(token);
@@ -429,12 +435,21 @@ function extractAddDirFlag(tokens) {
   return { command, addDir };
 }
 
+// 토큰 배열을 레지스트리에 저장할 단일 문자열로 직렬화한다. 공백이 든 토큰은
+// 따옴표로 감싸 splitCommand가 원래 경계를 복원할 수 있게 한다(예: "profile name").
+export function serializeCommand(tokens) {
+  return tokens.map((token) => {
+    if (token.includes('"')) throw new Error(`명령 토큰에 큰따옴표(")는 사용할 수 없습니다: ${token}`);
+    return /\s/.test(token) ? `"${token}"` : token;
+  }).join(' ');
+}
+
 function setAgent(paths, name, commandTokens) {
   if (!name) throw new Error('설정할 에이전트 이름이 필요합니다.\n사용법: llmwiki agent set <claude|codex> [--add-dir|--no-add-dir] <명령...>');
   const { command, addDir } = extractAddDirFlag(commandTokens);
   if (!command.length) throw new Error(`실행 명령이 필요합니다.\n사용법: llmwiki agent set ${name} <명령...>  (예: llmwiki agent set codex dbexec repo run isaac)`);
   // 커스텀 wrapper는 대개 --add-dir를 받지 않으므로 기본 off. 필요하면 --add-dir로 켠다.
-  const agent = normalizeAgentCommand({ name, command: command.join(' '), addDir: addDir ?? false });
+  const agent = normalizeAgentCommand({ name, command: serializeCommand(command), addDir: addDir ?? false });
   ensureRegistry(paths);
   const agents = readAgents(paths.registry).filter((item) => item.name !== agent.name);
   agents.push(agent);
@@ -836,7 +851,7 @@ async function start(paths, requestedAgent, agentArgs = []) {
 }
 
 // EDITOR는 `code -w`처럼 인자를 포함할 수 있으므로 토큰으로 나눠 사용한다.
-function splitCommand(value) {
+export function splitCommand(value) {
   return (value.match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((token) => token.replace(/^["']|["']$/g, ''));
 }
 

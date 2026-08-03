@@ -3,7 +3,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { parseOptions, prepareWorkspace } from '../src/cli.js';
+import {
+  extractAddDirFlag,
+  parseOptions,
+  prepareWorkspace,
+  serializeCommand,
+  splitCommand,
+} from '../src/cli.js';
 import { getPaths } from '../src/paths.js';
 import { writeRegistry } from '../src/registry.js';
 import { createSkill } from '../src/skills.js';
@@ -37,6 +43,29 @@ test('parseOptions treats declared booleans as flags', () => {
 test('parseOptions requires a value and collects positionals', () => {
   assert.throws(() => parseOptions(['--name'], { allowed: ['name'] }), /--name \uc635\uc158 \uac12\uc774 \ud544\uc694/);
   assert.deepEqual(parseOptions(['personal', '/tmp/v']).rest, ['personal', '/tmp/v']);
+});
+
+test('extractAddDirFlag consumes add-dir flags but preserves tokens after --', () => {
+  assert.deepEqual(extractAddDirFlag(['vibe', 'agent']), { command: ['vibe', 'agent'], addDir: undefined });
+  assert.deepEqual(extractAddDirFlag(['--add-dir', 'vibe']), { command: ['vibe'], addDir: true });
+  assert.deepEqual(extractAddDirFlag(['vibe', '--no-add-dir']), { command: ['vibe'], addDir: false });
+  // -- 이후는 경계로 취급해 실행 명령 인자로 그대로 보존한다.
+  assert.deepEqual(
+    extractAddDirFlag(['mycli', '--', '--add-dir', '.']),
+    { command: ['mycli', '--add-dir', '.'], addDir: undefined },
+  );
+  // -- 앞의 --no-add-dir는 여전히 설정 플래그로 소비된다.
+  assert.deepEqual(
+    extractAddDirFlag(['--no-add-dir', 'mycli', '--', '--add-dir']),
+    { command: ['mycli', '--add-dir'], addDir: false },
+  );
+});
+
+test('serializeCommand quotes whitespace tokens so splitCommand round-trips argv boundaries', () => {
+  const tokens = ['codex', 'wrapper', 'profile name'];
+  assert.equal(serializeCommand(tokens), 'codex wrapper "profile name"');
+  assert.deepEqual(splitCommand(serializeCommand(tokens)), tokens);
+  assert.throws(() => serializeCommand(['a"b']), /큰따옴표/);
 });
 
 test('prepareWorkspace refreshes managed files and keeps local agent state', () => {
