@@ -50,9 +50,9 @@ secure 볼트로 쓰기가 해소되면:
 
 원격 연동(`llmwiki publish`, `llmwiki inbox pull`)의 결정론 규칙:
 
-- **provider로 추상화.** 원격 대상은 `_meta/remote.json`의 `provider` 값으로 결정한다(현재 지원: `notion`). 새 대상은 `src/providers/<name>.js` 구현 + 레지스트리 등록으로 붙고, orchestrator·diff·보안 규칙은 provider-중립으로 공유된다.
+- **provider로 추상화.** 원격 대상은 `_meta/remote.json`의 `provider` 값으로 결정한다(현재 지원: `notion`). 새 대상은 `src/providers/<name>.js` 구현 + 레지스트리 등록으로 붙고, orchestrator·diff·보안 규칙은 provider-중립으로 공유된다. `_meta/remote.json`과 토큰은 `llmwiki vault add`의 원격 옵션(또는 대화형 위저드)으로 설정하며, 저장 전 provider API(토큰 유효성 + 대상 DB 존재)로 검증한다.
 - **호출당 정확히 한 볼트.** `publish`/`inbox`는 대상 볼트를 하나로 해소하고 그 볼트의 토큰·대상만 쓴다("publish all" 없음).
-- **토큰은 환경 변수에만.** 마크다운 레지스트리나 git에 저장하지 않는다. 조회 순서: `_meta/remote.json`의 `tokenEnv` → `LLMWIKI_<PROVIDER>_TOKEN_<VAULT>` → `LLMWIKI_<PROVIDER>_TOKEN`.
+- **토큰은 env 또는 설정 디렉터리 `secrets.json`에만.** 마크다운 레지스트리·git·`_meta/remote.json`에는 저장하지 않는다. `secrets.json`은 config 디렉터리에 `0600`으로 두고 `.gitignore`·`config export` 번들에서 제외한다. 조회 순서: `_meta/remote.json`의 `tokenEnv`(env) → `LLMWIKI_<PROVIDER>_TOKEN_<VAULT>`(env) → `LLMWIKI_<PROVIDER>_TOKEN`(env) → `secrets.json`(`provider:<VAULT>` → `provider:*`). env가 store보다 우선이다.
 - **비밀 아닌 설정만 커밋.** `_meta/remote.json`(provider, 대상 id, 동기화 서브디렉터리)과 상태 파일(`_meta/remote-map.json`, `_meta/remote-inbox.json`)은 git 커밋 대상이다.
 - **`kind: secure` 볼트 publish는 명시적 opt-in.** `_meta/remote.json`에 `"allowPublish": true`가 없으면 거부하고, 첫 push 전 확인·익명화 게이트를 거친다.
 

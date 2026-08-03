@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   chunkBlocks,
   createRemotePage,
+  extractDatabaseTitle,
   extractNotionTitle,
   fetchInboxNote,
   frontmatterToProperties,
@@ -11,6 +12,8 @@ import {
   markdownToBlocks,
   parseRichText,
   updateRemotePage,
+  validateToken,
+  verifyDatabase,
 } from '../src/providers/notion.js';
 
 test('markdownToBlocks maps headings (clamped to 3), lists, to-do, quote, divider', () => {
@@ -137,4 +140,29 @@ test('fetchInboxNote turns page blocks into markdown', async () => {
   assert.equal(note.title, 'Hello');
   assert.equal(note.createdAt, '2026-08-03');
   assert.equal(note.markdown, '# Title\n\nbody');
+});
+
+test('extractDatabaseTitle reads a database title rich_text array', () => {
+  assert.equal(extractDatabaseTitle({ title: [{ plain_text: 'Wiki' }, { plain_text: ' DB' }] }), 'Wiki DB');
+  assert.equal(extractDatabaseTitle({}), '');
+});
+
+test('validateToken resolves on users.me and surfaces a friendly error otherwise', async () => {
+  const ok = await validateToken({ users: { me: async () => ({ id: 'u1', name: 'Bot' }) } });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.account, 'Bot');
+  await assert.rejects(
+    () => validateToken({ users: { me: async () => { throw { code: 'unauthorized', message: 'API token is invalid.' }; } } }),
+    /토큰 검증 실패.*unauthorized/,
+  );
+});
+
+test('verifyDatabase resolves the title, rejects missing id, and reports not-found', async () => {
+  const found = await verifyDatabase({ databases: { retrieve: async () => ({ title: [{ plain_text: 'Notes' }] }) } }, { databaseId: 'db' });
+  assert.equal(found.title, 'Notes');
+  await assert.rejects(() => verifyDatabase({ databases: {} }, {}), /데이터베이스 id가 필요/);
+  await assert.rejects(
+    () => verifyDatabase({ databases: { retrieve: async () => { throw { code: 'object_not_found', message: 'Could not find database.' }; } } }, { databaseId: 'bad' }),
+    /데이터베이스\(bad\) 확인 실패.*object_not_found/,
+  );
 });

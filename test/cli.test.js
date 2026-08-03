@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   buildIngestPrompt,
+  configureRemote,
   extractAddDirFlag,
   main,
   parseOptions,
@@ -17,6 +18,9 @@ import { getPaths } from '../src/paths.js';
 import { writeRegistry, readRegistry } from '../src/registry.js';
 import { createSkill } from '../src/skills.js';
 import { isGitAvailable } from '../src/git.js';
+import { getSecret } from '../src/secrets.js';
+import { loadRemoteConfig } from '../src/remote.js';
+import { buildExportBundle } from '../src/settings.js';
 
 const HAS_GIT = isGitAvailable();
 
@@ -224,4 +228,91 @@ test('prepareWorkspace symlinks existing vaults into vaults/ and skips missing o
 
 test('prepareWorkspace fails with setup guidance when config is missing', () => {
   assert.throws(() => prepareWorkspace(tmpPaths()), /llmwiki setup/);
+});
+
+// configureRemote: 저장 전 검증 → 성공 시에만 토큰(store)·remote.json(토큰 없이) 기록.
+function stubProvider(calls) {
+  return {
+    name: 'notion',
+    tokenPrefix: 'NOTION',
+    createClient: async (token) => { calls.push(`create:${token}`); return {}; },
+    validateToken: async () => { calls.push('validate'); return { ok: true }; },
+    verifyDatabase: async (_c, { databaseId }) => { calls.push(`verify:${databaseId}`); return { ok: true }; },
+  };
+}
+
+test('configureRemote validates before storing, then writes token to store and db to remote.json', async () => {
+  const paths = tmpPaths();
+  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-cr-'));
+  const vault = { name: 'personal', path: vaultPath, kind: 'open' };
+  const calls = [];
+
+  const ok = await configureRemote(paths, vault,
+    { remote: 'notion', 'remote-token': 'secret_x', 'publish-db': 'db1', 'inbox-db': 'ibx' },
+    { getProvider: () => stubProvider(calls) });
+
+  assert.equal(ok, true);
+  // 검증(validate/verify)이 어떤 저장보다 먼저 실행됐다.
+  assert.deepEqual(calls, ['create:secret_x', 'validate', 'verify:db1', 'verify:ibx']);
+  assert.equal(getSecret(paths.secrets, 'notion', 'personal'), 'secret_x');
+  const config = loadRemoteConfig(vaultPath);
+  assert.equal(config.provider, 'notion');
+  assert.equal(config.publish.databaseId, 'db1');
+  assert.equal(config.inbox.databaseId, 'ibx');
+  // remote.json에는 토큰이 절대 담기지 않는다.
+  assert.doesNotMatch(fs.readFileSync(path.join(vaultPath, '_meta', 'remote.json'), 'utf8'), /secret_x|token/i);
+});
+
+test('configureRemote does not store anything when validation fails', async () => {
+  const paths = tmpPaths();
+  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-crfail-'));
+  const vault = { name: 'personal', path: vaultPath, kind: 'open' };
+  const provider = {
+    name: 'notion', tokenPrefix: 'NOTION',
+    createClient: async () => ({}),
+    validateToken: async () => { throw new Error('Notion 토큰 검증 실패 — unauthorized'); },
+    verifyDatabase: async () => ({ ok: true }),
+  };
+  await assert.rejects(
+    () => configureRemote(paths, vault, { remote: 'notion', 'remote-token': 'bad', 'publish-db': 'db1' }, { getProvider: () => provider }),
+    /토큰 검증 실패/,
+  );
+  assert.equal(getSecret(paths.secrets, 'notion', 'personal'), undefined);
+  assert.equal(loadRemoteConfig(vaultPath), null);
+});
+
+test('configureRemote (non-TTY) requires --remote-token when --remote is given', async () => {
+  const paths = tmpPaths();
+  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-crtok-'));
+  const vault = { name: 'personal', path: vaultPath, kind: 'open' };
+  await assert.rejects(
+    () => configureRemote(paths, vault, { remote: 'notion', 'publish-db': 'db1' }, { getProvider: () => stubProvider([]) }),
+    /--remote-token이 필요/,
+  );
+});
+
+test('configureRemote (non-TTY) drops secure publish without --allow-publish but keeps inbox', async () => {
+  const paths = tmpPaths();
+  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-crsec-'));
+  const vault = { name: 'work', path: vaultPath, kind: 'secure' };
+  const ok = await configureRemote(paths, vault,
+    { remote: 'notion', 'remote-token': 't', 'publish-db': 'db1', 'inbox-db': 'ibx' },
+    { getProvider: () => stubProvider([]) });
+  assert.equal(ok, true);
+  const config = loadRemoteConfig(vaultPath);
+  assert.equal(config.publish, undefined); // secure + no allow-publish → publish 미설정
+  assert.equal(config.inbox.databaseId, 'ibx');
+});
+
+test('config export bundle carries no stored tokens', async () => {
+  const paths = tmpPaths();
+  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-crexp-'));
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
+  await configureRemote(paths, { name: 'personal', path: vaultPath, kind: 'open' },
+    { remote: 'notion', 'remote-token': 'secret_x', 'publish-db': 'db1' },
+    { getProvider: () => stubProvider([]) });
+  const bundle = buildExportBundle(paths);
+  assert.doesNotMatch(JSON.stringify(bundle), /secret_x/);
+  assert.equal('tokens' in bundle, false);
+  assert.equal('secrets' in bundle, false);
 });

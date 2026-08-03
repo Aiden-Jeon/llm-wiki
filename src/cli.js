@@ -33,10 +33,11 @@ import {
   resolveCaptureVault,
   writeRawNote,
 } from './capture.js';
-import { loadRemoteConfig } from './remote.js';
+import { loadRemoteConfig, upsertRemoteConfig } from './remote.js';
 import { renderNote } from './note.js';
-import { getProvider } from './providers/index.js';
+import { getProvider, listProviders } from './providers/index.js';
 import { resolveRemoteToken } from './providers/token.js';
+import { setSecret } from './secrets.js';
 import { pushSync } from './sync.js';
 import { pullInbox } from './inbox.js';
 import {
@@ -52,8 +53,10 @@ import {
 } from './git.js';
 import { applyImportBundle, readExportBundle, writeExportBundle } from './settings.js';
 
-const VAULT_OPTION_KEYS = ['name', 'path', 'kind', 'backend', 'origin', 'signals', 'notes'];
-const VAULT_ADD_USAGE = 'llmwiki vault add --name <name> [--path <path>] [--kind open|secure] [--backend local|git] [--origin <git-url>] [--signals <신호>] [--notes <메모>]';
+const VAULT_OPTION_KEYS = ['name', 'path', 'kind', 'backend', 'origin', 'signals', 'notes',
+  'remote', 'remote-token', 'publish-db', 'inbox-db', 'title-prop', 'allow-publish'];
+const VAULT_BOOLEAN_KEYS = ['allow-publish'];
+const VAULT_ADD_USAGE = 'llmwiki vault add --name <name> [--path <path>] [--kind open|secure] [--backend local|git] [--origin <git-url>] [--signals <신호>] [--notes <메모>] [--remote <provider> --remote-token <token> --publish-db <id> --inbox-db <id> --title-prop <name> --allow-publish]';
 const VAULT_SYNC_USAGE = 'llmwiki vault sync [name] [--message <msg>] [--no-push] [--pull-only]';
 const CAPTURE_USAGE = 'llmwiki capture [--vault <name>] [--title <제목>] [--text <내용>]';
 const PUBLISH_USAGE = 'llmwiki publish [vault] [--dry-run] [--limit <n>]';
@@ -102,6 +105,10 @@ vault add 옵션:
   --name <name> [--path <path>] [--kind open|secure]
   [--backend local|git] [--origin <git-url>]
   [--signals <쉼표 구분 신호>] [--notes <메모>]
+  원격 연결(선택):
+  [--remote <provider>] [--remote-token <token>]
+  [--publish-db <id>] [--inbox-db <id>] [--title-prop <name>] [--allow-publish]
+  토큰은 저장 전에 provider API로 검증하고, 설정 디렉터리 secrets.json(0600)에 저장합니다.
 
 볼트 백엔드:
   local  이 머신의 폴더 (기본값)
@@ -143,10 +150,18 @@ capture 옵션:
 원격 연동 (publish/inbox):
   볼트별 설정은 <vault>/_meta/remote.json에 둡니다 (토큰 제외, git 커밋).
     { "provider": "notion", "publish": { "databaseId": "…" }, "inbox": { "databaseId": "…" }, "allowPublish": false }
+  llmwiki vault add의 원격 옵션(또는 대화형 위저드)으로 이 파일을 생성하고 토큰을 저장합니다.
   provider가 원격 대상을 결정합니다(현재 지원: notion). publish는 wiki/** 페이지를
   단방향 push해 view를 발행하고 상태는 <vault>/_meta/remote-map.json에 기록합니다.
   secure 볼트는 allowPublish: true 필요. Notion provider는 @notionhq/client가 필요합니다:
   npm i @notionhq/client
+
+토큰 저장·해소 순서 (앞이 우선):
+  1. remote.json의 tokenEnv가 가리키는 환경 변수
+  2. LLMWIKI_<PROVIDER>_TOKEN_<VAULT>  (환경 변수)
+  3. LLMWIKI_<PROVIDER>_TOKEN          (환경 변수)
+  4. 설정 디렉터리 secrets.json         (0600, git·config export 제외)
+  환경 변수가 secrets.json보다 우선합니다(CI·스크립트가 저장 토큰을 덮어쓸 수 있게).
 
 환경 변수:
   LLM_WIKI_AGENT       기본 에이전트 (claude 또는 codex)
@@ -387,7 +402,7 @@ function ensureGitVault(paths, { name, resolvedPath, origin }) {
 
 async function addVault(paths, args, { outro = true, initial = {}, edit = false } = {}) {
   ensureRegistry(paths);
-  const { options, rest } = parseOptions(args, { allowed: VAULT_OPTION_KEYS, usage: VAULT_ADD_USAGE });
+  const { options, rest } = parseOptions(args, { allowed: VAULT_OPTION_KEYS, booleans: VAULT_BOOLEAN_KEYS, usage: VAULT_ADD_USAGE });
   if (rest.length) throw new Error(`알 수 없는 인자: ${rest.join(' ')}\n사용법: ${VAULT_ADD_USAGE}`);
 
   const merged = { ...initial, ...options };
@@ -412,11 +427,121 @@ async function addVault(paths, args, { outro = true, initial = {}, edit = false 
   else vaults.push(vault);
   writeRegistry(paths.registry, vaults);
 
+  // 볼트 등록 후 원격 provider 연결을 안내한다(중단돼도 볼트 등록은 유지).
+  await configureRemote(paths, vault, options);
+
   const message = `${existing >= 0 ? '볼트 수정 완료' : '볼트 추가 완료'} · ${vault.name} → ${vault.path}`;
   if (stdin.isTTY) {
     if (outro) p.outro(message);
     else p.log.success(message);
   } else console.log(message);
+  return true;
+}
+
+/**
+ * 볼트에 원격 provider를 연결한다. 토큰·DB id를 받아 실호출로 검증한 뒤,
+ * 성공해야만 토큰을 secrets store에 저장하고 _meta/remote.json을 기록한다.
+ * getProvider는 테스트 주입 seam이다. 비-TTY에서는 --remote가 있어야만 동작한다.
+ */
+export async function configureRemote(paths, vault, opts = {}, { getProvider: resolveProvider = getProvider } = {}) {
+  const tty = Boolean(stdin.isTTY);
+
+  // 연결 여부: 비-TTY는 --remote가 있을 때만, TTY는 확인 프롬프트로 결정한다.
+  let providerName = opts.remote;
+  if (!providerName) {
+    if (!tty) return false;
+    const wants = await p.confirm({ message: '이 볼트에 원격 provider를 연결할까요?', initialValue: false });
+    if (cancelPrompt(wants) || !wants) return false;
+    const picked = await p.select({
+      message: '원격 provider',
+      options: listProviders().map((n) => ({ value: n, label: n })),
+    });
+    if (cancelPrompt(picked)) return false;
+    providerName = picked;
+  }
+
+  const provider = resolveProvider(providerName);
+
+  if (!vault || !fs.existsSync(vault.path)) {
+    const note = `${vault.name} 볼트 경로가 아직 없습니다. 원격 설정은 경로 생성 후 다시 시도하세요.`;
+    if (tty) p.log.warn(note); else console.error(note);
+    return false;
+  }
+
+  // 토큰: 플래그 우선, 없으면 TTY에서 password 프롬프트(에코 방지).
+  let token = opts['remote-token'];
+  if (!token) {
+    if (!tty) throw new Error(`--remote 사용 시 --remote-token이 필요합니다.\n사용법: ${VAULT_ADD_USAGE}`);
+    const entered = await p.password({ message: `${provider.name} 토큰`, mask: '•' });
+    if (cancelPrompt(entered)) return false;
+    token = entered;
+  }
+
+  // 대상 DB id: 플래그 우선, TTY는 각각 물어본다. 최소 하나는 있어야 한다.
+  let publishDb = opts['publish-db'];
+  let inboxDb = opts['inbox-db'];
+  if (!publishDb && !inboxDb && tty) {
+    const s = await p.text({ message: 'publish 대상 데이터베이스 id (없으면 비움)', defaultValue: '' });
+    if (cancelPrompt(s)) return false;
+    publishDb = (s || '').trim();
+    const i = await p.text({ message: 'inbox 데이터베이스 id (없으면 비움)', defaultValue: '' });
+    if (cancelPrompt(i)) return false;
+    inboxDb = (i || '').trim();
+  }
+  if (!publishDb && !inboxDb) {
+    const note = 'publish-db 또는 inbox-db 중 최소 하나가 필요합니다. 원격 설정을 건너뜁니다.';
+    if (tty) p.log.warn(note); else console.error(note);
+    return false;
+  }
+
+  // secure 볼트는 publish(민감 방향)에 명시적 allowPublish가 필요하다. 없으면 inbox만 설정한다.
+  let allowPublish = false;
+  if (publishDb && vault.kind === 'secure') {
+    if (tty) {
+      p.log.warn(`secure 볼트를 ${provider.name}에 push하게 됩니다. 고객명·자격증명·내부 URL 익명화를 확인하세요.`);
+      const ok = await p.confirm({ message: `${vault.name}(secure) publish를 활성화할까요?`, initialValue: false });
+      if (cancelPrompt(ok)) return false;
+      allowPublish = ok === true;
+    } else {
+      allowPublish = opts['allow-publish'] === true;
+    }
+    if (!allowPublish) {
+      const note = 'secure 볼트 publish에는 allowPublish(--allow-publish 또는 확인)가 필요합니다. inbox만 설정합니다.';
+      if (tty) p.log.warn(note); else console.error(note);
+      publishDb = '';
+      if (!inboxDb) return false;
+    }
+  }
+
+  // 저장 전 실호출 검증: 실패하면 아무것도 저장/기록하지 않는다.
+  const spin = tty ? p.spinner() : null;
+  if (spin) spin.start('원격 연결 검증 중');
+  try {
+    const client = await provider.createClient(token);
+    if (typeof provider.validateToken === 'function') await provider.validateToken(client);
+    if (typeof provider.verifyDatabase === 'function') {
+      if (publishDb) await provider.verifyDatabase(client, { databaseId: publishDb });
+      if (inboxDb) await provider.verifyDatabase(client, { databaseId: inboxDb });
+    }
+  } catch (error) {
+    if (spin) spin.stop('검증 실패');
+    throw error;
+  }
+  if (spin) spin.stop('검증 완료');
+
+  // 검증 통과 → 토큰은 store에만, 대상 설정은 remote.json에(토큰 없이) 기록한다.
+  setSecret(paths.secrets, provider.name, vault.name, token);
+  const patch = { provider: provider.name };
+  if (publishDb) {
+    patch.publish = { databaseId: publishDb };
+    if (opts['title-prop']) patch.publish.titleProperty = opts['title-prop'];
+    if (vault.kind === 'secure') patch.allowPublish = true;
+  }
+  if (inboxDb) patch.inbox = { databaseId: inboxDb };
+  upsertRemoteConfig(vault.path, patch);
+
+  const summary = `원격 연결 · ${vault.name} → ${provider.name}${publishDb ? ' · publish' : ''}${inboxDb ? ' · inbox' : ''} · 토큰 저장됨(secrets.json)`;
+  if (tty) p.log.success(summary); else console.log(summary);
   return true;
 }
 
@@ -1320,7 +1445,7 @@ async function publish(paths, args) {
   // 토큰·클라이언트는 dry-run이 아닐 때만 필요하다(오프라인에서 diff 미리보기 가능).
   const client = dryRun
     ? null
-    : await provider.createClient(resolveRemoteToken(process.env, { prefix: provider.tokenPrefix, vaultName: vault.name, config }));
+    : await provider.createClient(resolveRemoteToken(process.env, { prefix: provider.tokenPrefix, vaultName: vault.name, config, secretsPath: paths.secrets, provider: provider.name }));
   const summary = await pushSync(vault.path, {
     provider,
     client,
@@ -1354,7 +1479,7 @@ async function inboxPull(paths, args) {
   const limit = parseLimit(options);
 
   const client = await provider.createClient(
-    resolveRemoteToken(process.env, { prefix: provider.tokenPrefix, vaultName: vault.name, config }),
+    resolveRemoteToken(process.env, { prefix: provider.tokenPrefix, vaultName: vault.name, config, secretsPath: paths.secrets, provider: provider.name }),
   );
   const result = await pullInbox(vault.path, {
     provider,

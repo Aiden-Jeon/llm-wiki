@@ -22,6 +22,45 @@ export async function createClient(token) {
   return new mod.Client({ auth: token });
 }
 
+// ── 검증(validate/verify) : provider 인터페이스(선택) ─────────────────────
+
+// Notion APIResponseError는 code(unauthorized, object_not_found …)·status를 담는다.
+function notionErrorMessage(error) {
+  const code = error && (error.code || error.status);
+  const base = error && error.message ? error.message : String(error);
+  return code ? `${code}: ${base}` : base;
+}
+
+// 데이터베이스 제목(rich_text 배열)을 평문으로 뽑는다.
+export function extractDatabaseTitle(db) {
+  return richTextToPlain(db && db.title);
+}
+
+/**
+ * 토큰 유효성을 실호출로 확인한다. 성공 시 { ok, account }, 실패 시 친절한 에러를 던진다.
+ */
+export async function validateToken(client) {
+  try {
+    const me = await client.users.me({});
+    return { ok: true, account: me && (me.name || me.id) };
+  } catch (error) {
+    throw new Error(`Notion 토큰 검증 실패 — ${notionErrorMessage(error)}`);
+  }
+}
+
+/**
+ * 대상 데이터베이스가 존재·도달 가능한지 확인한다. 성공 시 { ok, title }, 실패 시 에러.
+ */
+export async function verifyDatabase(client, { databaseId } = {}) {
+  if (!databaseId) throw new Error('데이터베이스 id가 필요합니다.');
+  try {
+    const db = await client.databases.retrieve({ database_id: databaseId });
+    return { ok: true, title: extractDatabaseTitle(db) };
+  } catch (error) {
+    throw new Error(`Notion 데이터베이스(${databaseId}) 확인 실패 — ${notionErrorMessage(error)}`);
+  }
+}
+
 // ── 마크다운 → Notion 블록 ────────────────────────────────────────────────
 
 const HEADING_LEVEL = { 1: 'heading_1', 2: 'heading_2', 3: 'heading_3' };

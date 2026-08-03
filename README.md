@@ -278,10 +278,16 @@ llmwiki inbox pull personal --dry-run           # Notion inbox 새 항목 미리
 
 로컬에서 작업한 위키를 원격 저장소에 **단방향(local→원격)** 으로 발행하고(`publish`), 원격 inbox에서 새 정보를 가져옵니다(`inbox pull`). 원격 대상은 **provider**로 추상화되어 있으며, 현재 Notion을 지원합니다.
 
+원격 연결은 `vault add`에서 설정합니다. 토큰과 대상 DB를 넘기면 저장 전에 provider API로 검증(토큰 유효성 + 대상 DB 존재)한 뒤, 토큰은 설정 디렉터리 `secrets.json`(`0600`)에, 대상 설정은 `_meta/remote.json`에 기록합니다.
+
 ```bash
-export LLMWIKI_NOTION_TOKEN_PERSONAL=secret_xxx
+# 플래그로 한 번에 (검증 후 토큰 저장 · remote.json 기록)
+llmwiki vault add --name personal --path ~/wikis/personal \
+  --remote notion --remote-token secret_xxx --publish-db <db-id> --inbox-db <inbox-db-id>
+# 또는 인자 없이 `llmwiki vault add`로 대화형 위저드 진행 (토큰은 가려서 입력)
+
 llmwiki publish personal --dry-run   # diff 미리보기 (토큰 없이도 가능)
-llmwiki publish personal             # 없는/바뀐 페이지만 push
+llmwiki publish personal             # 없는/바뀐 페이지만 push (저장된 토큰 사용, 재입력 불필요)
 ```
 
 - 볼트별 설정은 `<vault>/_meta/remote.json`에 둡니다(토큰 제외, git 커밋). `provider`가 원격 대상을 결정합니다:
@@ -294,7 +300,7 @@ llmwiki publish personal             # 없는/바뀐 페이지만 push
     "allowPublish": false
   }
   ```
-- **토큰은 환경 변수에만** 둡니다(파일·git 금지). 조회 순서: `remote.json`의 `tokenEnv` → `LLMWIKI_<PROVIDER>_TOKEN_<VAULT>` → `LLMWIKI_<PROVIDER>_TOKEN` (예: `LLMWIKI_NOTION_TOKEN_PERSONAL`).
+- **토큰은 env 또는 설정 디렉터리 `secrets.json`에만** 둡니다(레지스트리·git·`remote.json` 저장 금지). `secrets.json`은 `0600`이며 `.gitignore`·`config export`에서 제외됩니다. 조회 순서: `remote.json`의 `tokenEnv`(env) → `LLMWIKI_<PROVIDER>_TOKEN_<VAULT>`(env) → `LLMWIKI_<PROVIDER>_TOKEN`(env) → `secrets.json`. env가 store보다 우선이라 CI·스크립트에서 저장 토큰을 덮어쓸 수 있습니다.
 - 발행 상태는 `_meta/remote-map.json`에 슬러그별 `remoteId`·콘텐츠 해시로 기록합니다. 해시가 바뀐 페이지만 갱신하고, 원격→local 역방향이나 원격 페이지 삭제는 하지 않습니다.
 - `kind: secure` 볼트는 `remote.json`에 `"allowPublish": true`가 있어야 하고, push 전 확인·익명화 게이트를 거칩니다.
 - Notion provider는 `@notionhq/client`가 필요합니다(선택 의존성): `npm i @notionhq/client`.

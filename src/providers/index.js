@@ -5,6 +5,9 @@
 //   name        provider 식별자(remote.json의 provider 값과 일치)
 //   tokenPrefix 토큰 환경 변수 접두사 (LLMWIKI_<PREFIX>_TOKEN[_<VAULT>])
 //   createClient(token) → client        지연 로딩. 미설치 SDK는 친절한 에러.
+//   검증(선택 — typeof로 존재 확인):
+//     validateToken(client) → { ok, account? }        토큰 실호출 검증. 실패 시 throw.
+//     verifyDatabase(client, { databaseId }) → { ok, title? }  대상 DB 존재 확인. 실패 시 throw.
 //   출력(sync):
 //     defaultSyncSubdirs                 config에 없을 때 동기화할 wiki 서브디렉터리
 //     createRemotePage(client, ctx, page) → remoteId   신규 페이지 발행

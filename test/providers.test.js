@@ -6,6 +6,7 @@ import path from 'node:path';
 import { getProvider, listProviders } from '../src/providers/index.js';
 import { resolveRemoteToken } from '../src/providers/token.js';
 import { loadRemoteConfig } from '../src/remote.js';
+import { setSecret } from '../src/secrets.js';
 
 function tmpVault() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-provider-'));
@@ -33,6 +34,24 @@ test('resolveRemoteToken honors precedence per provider prefix', () => {
 
 test('resolveRemoteToken throws listing the checked env vars when none set', () => {
   assert.throws(() => resolveRemoteToken({}, { prefix: 'NOTION', vaultName: 'work' }), /LLMWIKI_NOTION_TOKEN_WORK/);
+});
+
+test('resolveRemoteToken falls back to the secrets store when env is empty', () => {
+  const file = path.join(tmpVault(), 'secrets.json');
+  setSecret(file, 'notion', 'personal', 'stored-token');
+  assert.equal(
+    resolveRemoteToken({}, { prefix: 'NOTION', vaultName: 'personal', secretsPath: file, provider: 'notion' }),
+    'stored-token',
+  );
+});
+
+test('resolveRemoteToken lets env win over the secrets store', () => {
+  const file = path.join(tmpVault(), 'secrets.json');
+  setSecret(file, 'notion', 'personal', 'stored-token');
+  assert.equal(
+    resolveRemoteToken({ LLMWIKI_NOTION_TOKEN_PERSONAL: 'env-token' }, { prefix: 'NOTION', vaultName: 'personal', secretsPath: file, provider: 'notion' }),
+    'env-token',
+  );
 });
 
 test('loadRemoteConfig returns null when absent and defaults provider to notion', () => {
