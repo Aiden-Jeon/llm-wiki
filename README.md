@@ -191,6 +191,7 @@ CLI는 관리형 워크스페이스를 준비한 뒤 에이전트를 실행하�
 | `llmwiki skill templates` | 내장 스킬 템플릿 목록 |
 | `llmwiki skill path [name]` | 스킬 원본 경로 출력 |
 | `llmwiki doctor` | 설정·볼트·에이전트 진단 |
+| `llmwiki reset [--purge-vaults]` | 모든 사용자 설정을 지워 setup 이전 상태로 초기화 (볼트 실제 파일은 보존, `--purge-vaults`면 함께 삭제) |
 | `llmwiki config path/edit` | 설정 위치 확인 및 직접 편집 |
 | `llmwiki config export/import` | 설정(볼트·스킬)을 JSON 번들로 내보내기/가져오기 |
 | `llmwiki [claude\|codex]` | 통합 라우터 시작 |

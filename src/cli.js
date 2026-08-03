@@ -79,6 +79,7 @@ const CONFIG_EXPORT_USAGE = 'llmwiki config export [--output <file>]';
 const CONFIG_IMPORT_USAGE = 'llmwiki config import <file> [--vaults-dir <dir>] [--force]';
 const INBOX_USAGE = 'llmwiki inbox pull [vault] [--dry-run] [--limit <n>]';
 const SKILL_ADD_USAGE = 'llmwiki skill add <name> [--description <설명>] [--from <경로>] [--template <name>] [--force] [--no-edit]';
+const RESET_USAGE = 'llmwiki reset [--purge-vaults] [--force]';
 const IS_WINDOWS = process.platform === 'win32';
 
 const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운영합니다.
@@ -117,6 +118,7 @@ const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운영합�
   llmwiki skill templates         내장 스킬 템플릿 목록
   llmwiki skill path [name]       스킬 디렉터리 경로 출력
   llmwiki doctor                  설정·볼트·스킬·에이전트 상태 진단
+  llmwiki reset [--purge-vaults] [--force]   모든 사용자 설정을 지워 setup 이전 상태로 초기화
   llmwiki config path             설정 파일 경로 출력
   llmwiki config edit             $EDITOR로 설정 편집
   llmwiki config export [--output <file>]        설정(볼트·스킬)을 JSON 번들로 내보내기
@@ -2120,6 +2122,70 @@ async function importConfig(paths, args) {
   return true;
 }
 
+/**
+ * `llmwiki reset [--purge-vaults] [--force]`: 모든 사용자 설정을 지워 setup 이전 상태로 되돌린다.
+ * 레지스트리·토큰·발행 설정·커스텀 스킬·워크스페이스를 삭제한다. 등록된 볼트의 실제 파일은
+ * 기본적으로 보존하고(레지스트리 엔트리만 사라짐), --purge-vaults면 볼트 디렉터리까지 지운다.
+ * configDir/vaultsHome 자체는 지우지 않고 이름을 지정한 파일·개별 볼트 경로만 삭제한다.
+ * (agent reset과 무관 — 이건 최상위 명령이다.)
+ */
+export async function resetConfig(paths, args) {
+  const { options, rest } = parseOptions(args, {
+    allowed: ['purge-vaults', 'force'],
+    booleans: ['purge-vaults', 'force'],
+    usage: RESET_USAGE,
+  });
+  if (rest.length) throw new Error(`알 수 없는 인자: ${rest.join(' ')}\n사용법: ${RESET_USAGE}`);
+  const tty = Boolean(stdin.isTTY);
+  const purgeVaults = options['purge-vaults'] === true;
+
+  // 삭제 대상 수집. config 파일/디렉터리는 존재하는 것만, 볼트 경로는 purge일 때만.
+  // 레지스트리는 깨져 있어도 reset은 진행돼야 하므로 issues는 무시한다(파일이 없으면 빈 목록).
+  const configTargets = [
+    { path: paths.registry, recursive: false, label: '볼트 레지스트리' },
+    { path: paths.secrets, recursive: false, label: '연결 토큰(secrets.json)' },
+    { path: paths.publish, recursive: false, label: '발행 설정(publish.json)' },
+    { path: path.join(paths.configDir, '.gitignore'), recursive: false, label: 'config .gitignore' },
+    { path: paths.skillsDir, recursive: true, label: '커스텀 스킬' },
+    { path: paths.workspace, recursive: true, label: '실행 워크스페이스' },
+  ].filter((target) => fs.existsSync(target.path));
+
+  const vaultTargets = purgeVaults
+    ? readRegistryFile(paths.registry).vaults
+      .filter((vault) => fs.existsSync(vault.path))
+      .map((vault) => ({ path: vault.path, recursive: true, label: `볼트 파일 · ${vault.name}` }))
+    : [];
+
+  const targets = [...configTargets, ...vaultTargets];
+  if (!targets.length) {
+    const message = '이미 초기 상태입니다 — 지울 설정이 없습니다.';
+    if (tty) p.log.info(message); else console.log(message);
+    return true;
+  }
+
+  // 확인 게이트. TTY는 대상 요약 박스 + 확인, 비-TTY는 --force가 없으면 거부한다.
+  if (tty) {
+    const summaryLines = targets.map((target) => `${target.label} · ${target.path}`);
+    if (purgeVaults) summaryLines.push('', '⚠ --purge-vaults: 등록된 볼트의 실제 파일이 영구 삭제됩니다.');
+    console.log(renderNote(summaryLines.join('\n'), '초기화 대상'));
+    const accepted = await p.confirm({ message: '이 항목을 모두 삭제할까요? (되돌릴 수 없습니다)', initialValue: false });
+    if (cancelPrompt(accepted) || !accepted) {
+      if (accepted === false) p.cancel('초기화하지 않았습니다.');
+      return false;
+    }
+  } else if (options.force !== true) {
+    throw new Error(`비대화형 환경에서 설정을 초기화하려면 --force가 필요합니다.\n사용법: ${RESET_USAGE}`);
+  }
+
+  for (const target of targets) {
+    fs.rmSync(target.path, { recursive: target.recursive, force: true });
+  }
+
+  const summary = `설정 초기화 완료 · ${targets.length}개 항목 삭제${purgeVaults ? ' (볼트 파일 포함)' : ''}\n\`llmwiki setup\`으로 다시 설정하세요.`;
+  if (tty) p.log.success(summary); else console.log(summary);
+  return true;
+}
+
 export async function main(args) {
   const paths = getPaths();
   const [command = 'start', ...rest] = args;
@@ -2131,6 +2197,10 @@ export async function main(args) {
   }
   if (command === 'setup' || command === 'init') return setup(paths, rest);
   if (command === 'doctor') return doctor(paths);
+  if (command === 'reset') {
+    if (stdin.isTTY) p.intro('llmwiki · 설정 초기화');
+    return resetConfig(paths, rest);
+  }
   if (command === 'claude' || command === 'codex') return start(paths, command, rest);
   if (command === 'start') {
     const agent = ['claude', 'codex'].includes(rest[0]) ? rest.shift() : undefined;

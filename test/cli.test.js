@@ -14,6 +14,7 @@ import {
   parseOptions,
   prepareWorkspace,
   publishRemove,
+  resetConfig,
   serializeCommand,
   splitCommand,
 } from '../src/cli.js';
@@ -574,4 +575,51 @@ test('connection remove warns (non-TTY) when a vault still references it but sti
   assert.equal(getConnectionToken(paths.secrets, 'notion', 'shared'), undefined);
   // 설정 엔트리는 그대로 남는다(연결만 사라진다).
   assert.equal(loadRemoteConfig(paths.publish, 'personal').connection, 'shared');
+});
+
+test('reset wipes config but preserves registered vault files by default', async () => {
+  const paths = tmpPaths();
+  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-resetvault-'));
+  const vaultFile = path.join(vaultPath, 'index.md');
+  fs.writeFileSync(vaultFile, '# keep me');
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
+  addConnection(paths.secrets, 'notion', 'work', { token: 'secret_w' });
+  createSkill(paths.skillsDir, { name: 'weekly-retro', description: '주간 회고.' });
+  fs.mkdirSync(paths.workspace, { recursive: true });
+  fs.writeFileSync(path.join(paths.workspace, 'CLAUDE.md'), 'x');
+
+  const result = await resetConfig(paths, ['--force']);
+  assert.equal(result, true);
+  // config 상태는 모두 사라진다.
+  assert.equal(fs.existsSync(paths.registry), false);
+  assert.equal(fs.existsSync(paths.secrets), false);
+  assert.equal(fs.existsSync(paths.skillsDir), false);
+  assert.equal(fs.existsSync(paths.workspace), false);
+  // 볼트 실제 파일은 보존된다.
+  assert.equal(fs.existsSync(vaultFile), true);
+});
+
+test('reset --purge-vaults also deletes the registered vault directory', async () => {
+  const paths = tmpPaths();
+  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-resetpurge-'));
+  fs.writeFileSync(path.join(vaultPath, 'index.md'), '# gone');
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
+
+  await resetConfig(paths, ['--purge-vaults', '--force']);
+  assert.equal(fs.existsSync(vaultPath), false);
+  assert.equal(fs.existsSync(paths.registry), false);
+});
+
+test('reset refuses without --force in non-interactive mode', async () => {
+  const paths = tmpPaths();
+  writeRegistry(paths.registry, [{ name: 'personal', path: '/tmp/personal', kind: 'open' }]);
+  await assert.rejects(() => resetConfig(paths, []), /--force/);
+  // 거부됐으므로 레지스트리는 그대로 있어야 한다.
+  assert.equal(fs.existsSync(paths.registry), true);
+});
+
+test('reset is idempotent on an empty config', async () => {
+  const paths = tmpPaths();
+  const result = await resetConfig(paths, ['--force']);
+  assert.equal(result, true);
 });
