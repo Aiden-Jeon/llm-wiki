@@ -5,10 +5,14 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   buildIngestPrompt,
+  configureRemote,
+  connectionAdd,
+  connectionRemove,
   extractAddDirFlag,
   main,
   parseOptions,
   prepareWorkspace,
+  publishRemove,
   serializeCommand,
   splitCommand,
 } from '../src/cli.js';
@@ -17,6 +21,9 @@ import { getPaths } from '../src/paths.js';
 import { writeRegistry, readRegistry } from '../src/registry.js';
 import { createSkill } from '../src/skills.js';
 import { isGitAvailable } from '../src/git.js';
+import { getConnectionToken, addConnection, listConnections } from '../src/secrets.js';
+import { loadRemoteConfig } from '../src/remote.js';
+import { buildExportBundle } from '../src/settings.js';
 
 const HAS_GIT = isGitAvailable();
 
@@ -155,6 +162,46 @@ test('publish accepts --dry-run so it errors on config, not on the flag', async 
   }
 });
 
+test('publish subcommands route: list on empty store and add requires a token', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-pubsub-'));
+  const paths = getPaths({ LLM_WIKI_CONFIG_HOME: path.join(root, 'config'), LLM_WIKI_DATA_HOME: path.join(root, 'data') });
+  const vaultPath = path.join(root, 'vault');
+  fs.mkdirSync(vaultPath, { recursive: true });
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
+
+  const prevConfig = process.env.LLM_WIKI_CONFIG_HOME;
+  const prevData = process.env.LLM_WIKI_DATA_HOME;
+  process.env.LLM_WIKI_CONFIG_HOME = path.join(root, 'config');
+  process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
+  try {
+    // list는 빈 store에서도 성공한다(설정 없음 안내).
+    assert.equal(await main(['publish', 'list']), true);
+    // add는 add 서브명령으로 라우팅돼 토큰 부재까지 도달한다(볼트 이름으로 오인 안 함).
+    await assert.rejects(() => main(['publish', 'add', 'personal', '--remote', 'notion', '--publish-db', 'db1']), /--remote-token\(과 --connection\)이 필요/);
+  } finally {
+    if (prevConfig === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prevConfig;
+    if (prevData === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prevData;
+  }
+});
+
+test('vault add no longer accepts remote flags (decoupled from publish add)', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-vadd-'));
+  const prevConfig = process.env.LLM_WIKI_CONFIG_HOME;
+  const prevData = process.env.LLM_WIKI_DATA_HOME;
+  process.env.LLM_WIKI_CONFIG_HOME = path.join(root, 'config');
+  process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
+  try {
+    // 원격 옵션이 vault add에서 제거됐으므로 알 수 없는 옵션으로 실패해야 한다.
+    await assert.rejects(
+      () => main(['vault', 'add', '--name', 'x', '--path', path.join(root, 'v'), '--remote', 'notion']),
+      /알 수 없는 옵션: --remote/,
+    );
+  } finally {
+    if (prevConfig === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prevConfig;
+    if (prevData === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prevData;
+  }
+});
+
 test('prepareWorkspace refreshes managed files and keeps local agent state', () => {
   const paths = tmpPaths();
   writeRegistry(paths.registry, [{ name: 'personal', path: '/tmp/personal', kind: 'open' }]);
@@ -224,4 +271,262 @@ test('prepareWorkspace symlinks existing vaults into vaults/ and skips missing o
 
 test('prepareWorkspace fails with setup guidance when config is missing', () => {
   assert.throws(() => prepareWorkspace(tmpPaths()), /llmwiki setup/);
+});
+
+// configureRemote: 저장 전 검증 → 성공 시에만 토큰(store)·remote.json(토큰 없이) 기록.
+function stubProvider(calls) {
+  return {
+    name: 'notion',
+    tokenPrefix: 'NOTION',
+    createClient: async (token) => { calls.push(`create:${token}`); return {}; },
+    validateToken: async () => { calls.push('validate'); return { ok: true }; },
+    verifyDatabase: async (_c, { databaseId }) => { calls.push(`verify:${databaseId}`); return { ok: true }; },
+  };
+}
+
+test('configureRemote validates before storing, then writes token to store and db to publish.json', async () => {
+  const paths = tmpPaths();
+  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-cr-'));
+  const vault = { name: 'personal', path: vaultPath, kind: 'open' };
+  const calls = [];
+
+  const ok = await configureRemote(paths, vault,
+    { remote: 'notion', connection: 'personal', 'remote-token': 'secret_x', 'publish-db': 'db1', 'inbox-db': 'ibx' },
+    { getProvider: () => stubProvider(calls) });
+
+  assert.equal(ok, true);
+  // 검증(validate/verify)이 어떤 저장보다 먼저 실행됐다.
+  assert.deepEqual(calls, ['create:secret_x', 'validate', 'verify:db1', 'verify:ibx']);
+  // 토큰은 named connection('personal')으로 저장된다.
+  assert.equal(getConnectionToken(paths.secrets, 'notion', 'personal'), 'secret_x');
+  const config = loadRemoteConfig(paths.publish, 'personal');
+  assert.equal(config.provider, 'notion');
+  assert.equal(config.publish.databaseId, 'db1');
+  assert.equal(config.inbox.databaseId, 'ibx');
+  // 설정은 볼트 밖 전역 publish.json에 저장되고, 볼트 _meta/에는 아무것도 쓰지 않는다.
+  assert.equal(fs.existsSync(path.join(vaultPath, '_meta', 'remote.json')), false);
+  // publish.json에는 토큰이 절대 담기지 않는다.
+  assert.doesNotMatch(fs.readFileSync(paths.publish, 'utf8'), /secret_x|token/i);
+});
+
+test('configureRemote does not store anything when validation fails', async () => {
+  const paths = tmpPaths();
+  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-crfail-'));
+  const vault = { name: 'personal', path: vaultPath, kind: 'open' };
+  const provider = {
+    name: 'notion', tokenPrefix: 'NOTION',
+    createClient: async () => ({}),
+    validateToken: async () => { throw new Error('Notion 토큰 검증 실패 — unauthorized'); },
+    verifyDatabase: async () => ({ ok: true }),
+  };
+  await assert.rejects(
+    () => configureRemote(paths, vault, { remote: 'notion', connection: 'personal', 'remote-token': 'bad', 'publish-db': 'db1' }, { getProvider: () => provider }),
+    /토큰 검증 실패/,
+  );
+  assert.equal(getConnectionToken(paths.secrets, 'notion', 'personal'), undefined);
+  assert.equal(loadRemoteConfig(paths.publish, 'personal'), null);
+});
+
+test('configureRemote (non-TTY) needs a token when no connection is stored', async () => {
+  const paths = tmpPaths();
+  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-crtok-'));
+  const vault = { name: 'personal', path: vaultPath, kind: 'open' };
+  await assert.rejects(
+    () => configureRemote(paths, vault, { remote: 'notion', 'publish-db': 'db1' }, { getProvider: () => stubProvider([]) }),
+    /--remote-token/,
+  );
+});
+
+test('configureRemote (non-TTY) defaults the connection name to the vault name', async () => {
+  const paths = tmpPaths();
+  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-crdef-'));
+  const vault = { name: 'personal', path: vaultPath, kind: 'open' };
+  await configureRemote(paths, vault,
+    { remote: 'notion', 'remote-token': 'secret_x', 'publish-db': 'db1' },
+    { getProvider: () => stubProvider([]) });
+  const config = loadRemoteConfig(paths.publish, 'personal');
+  assert.equal(config.connection, 'personal');
+  assert.equal(getConnectionToken(paths.secrets, 'notion', 'personal'), 'secret_x');
+});
+
+test('configureRemote reuses a stored connection by name without a new token', async () => {
+  const paths = tmpPaths();
+  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-crreuse-'));
+  addConnection(paths.secrets, 'notion', 'shared', { token: 'secret_shared', account: 'ACME' });
+  const calls = [];
+  const ok = await configureRemote(paths, { name: 'work', path: vaultPath, kind: 'open' },
+    { remote: 'notion', connection: 'shared', 'publish-db': 'db1' },
+    { getProvider: () => stubProvider(calls) });
+  assert.equal(ok, true);
+  // 저장된 연결 토큰으로 검증했다(새로 저장하지 않는다).
+  assert.deepEqual(calls, ['create:secret_shared', 'validate', 'verify:db1']);
+  assert.equal(loadRemoteConfig(paths.publish, 'work').connection, 'shared');
+  assert.equal(listConnections(paths.secrets, 'notion').length, 1);
+});
+
+test('configureRemote (non-TTY) drops secure publish without --allow-publish but keeps inbox', async () => {
+  const paths = tmpPaths();
+  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-crsec-'));
+  const vault = { name: 'work', path: vaultPath, kind: 'secure' };
+  const ok = await configureRemote(paths, vault,
+    { remote: 'notion', 'remote-token': 't', 'publish-db': 'db1', 'inbox-db': 'ibx' },
+    { getProvider: () => stubProvider([]) });
+  assert.equal(ok, true);
+  const config = loadRemoteConfig(paths.publish, 'work');
+  assert.equal(config.publish, undefined); // secure + no allow-publish → publish 미설정
+  assert.equal(config.inbox.databaseId, 'ibx');
+});
+
+test('publish remove (non-TTY) keeps the connection token by default', async () => {
+  const paths = tmpPaths();
+  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-prkeep-'));
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
+  await configureRemote(paths, { name: 'personal', path: vaultPath, kind: 'open' },
+    { remote: 'notion', connection: 'personal', 'remote-token': 'secret_x', 'publish-db': 'db1' },
+    { getProvider: () => stubProvider([]) });
+
+  const removed = await publishRemove(paths, ['personal']);
+
+  assert.equal(removed, true);
+  assert.equal(loadRemoteConfig(paths.publish, 'personal'), null); // 설정은 삭제됐다
+  assert.equal(getConnectionToken(paths.secrets, 'notion', 'personal'), 'secret_x'); // 토큰(연결)은 유지됐다
+});
+
+test('publish remove --purge-token deletes the token once the connection is orphaned', async () => {
+  const paths = tmpPaths();
+  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-prpurge-'));
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
+  await configureRemote(paths, { name: 'personal', path: vaultPath, kind: 'open' },
+    { remote: 'notion', connection: 'personal', 'remote-token': 'secret_x', 'publish-db': 'db1' },
+    { getProvider: () => stubProvider([]) });
+
+  const removed = await publishRemove(paths, ['personal', '--purge-token']);
+
+  assert.equal(removed, true);
+  assert.equal(getConnectionToken(paths.secrets, 'notion', 'personal'), undefined); // 고아 → 토큰 삭제
+});
+
+test('publish remove --purge-token keeps a connection still used by another vault', async () => {
+  const paths = tmpPaths();
+  const vpA = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-prshareA-'));
+  const vpB = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-prshareB-'));
+  writeRegistry(paths.registry, [
+    { name: 'alpha', path: vpA, kind: 'open' },
+    { name: 'beta', path: vpB, kind: 'open' },
+  ]);
+  // 두 볼트가 같은 연결 'shared'를 쓴다.
+  await configureRemote(paths, { name: 'alpha', path: vpA, kind: 'open' },
+    { remote: 'notion', connection: 'shared', 'remote-token': 'secret_s', 'publish-db': 'db1' },
+    { getProvider: () => stubProvider([]) });
+  await configureRemote(paths, { name: 'beta', path: vpB, kind: 'open' },
+    { remote: 'notion', connection: 'shared', 'publish-db': 'db2' },
+    { getProvider: () => stubProvider([]) });
+
+  // alpha만 지워도 beta가 아직 쓰므로 --purge-token이어도 토큰은 남는다.
+  await publishRemove(paths, ['alpha', '--purge-token']);
+  assert.equal(getConnectionToken(paths.secrets, 'notion', 'shared'), 'secret_s');
+
+  // beta까지 지우면 고아가 되어 삭제된다.
+  await publishRemove(paths, ['beta', '--purge-token']);
+  assert.equal(getConnectionToken(paths.secrets, 'notion', 'shared'), undefined);
+});
+
+test('publish remove rejects conflicting --purge-token and --keep-token', async () => {
+  const paths = tmpPaths();
+  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-prconf-'));
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
+  await configureRemote(paths, { name: 'personal', path: vaultPath, kind: 'open' },
+    { remote: 'notion', connection: 'personal', 'remote-token': 'secret_x', 'publish-db': 'db1' },
+    { getProvider: () => stubProvider([]) });
+  await assert.rejects(
+    () => publishRemove(paths, ['personal', '--purge-token', '--keep-token']),
+    /함께 쓸 수 없습니다/,
+  );
+});
+
+test('config export bundle carries no stored tokens', async () => {
+  const paths = tmpPaths();
+  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-crexp-'));
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
+  await configureRemote(paths, { name: 'personal', path: vaultPath, kind: 'open' },
+    { remote: 'notion', 'remote-token': 'secret_x', 'publish-db': 'db1' },
+    { getProvider: () => stubProvider([]) });
+  const bundle = buildExportBundle(paths);
+  assert.doesNotMatch(JSON.stringify(bundle), /secret_x/);
+  assert.equal('tokens' in bundle, false);
+  assert.equal('secrets' in bundle, false);
+});
+
+test('connection add validates then stores the token with its account', async () => {
+  const paths = tmpPaths();
+  const calls = [];
+  const provider = {
+    name: 'notion', tokenPrefix: 'NOTION',
+    createClient: async (token) => { calls.push(`create:${token}`); return {}; },
+    validateToken: async () => { calls.push('validate'); return { ok: true, account: 'ACME' }; },
+  };
+  const ok = await connectionAdd(paths, ['--remote', 'notion', '--name', 'work-team', '--remote-token', 'secret_w'],
+    { getProvider: () => provider });
+  assert.equal(ok, true);
+  assert.deepEqual(calls, ['create:secret_w', 'validate']);
+  assert.equal(getConnectionToken(paths.secrets, 'notion', 'work-team'), 'secret_w');
+  assert.equal(listConnections(paths.secrets, 'notion')[0].account, 'ACME');
+});
+
+test('connection add (non-TTY) requires --name and --remote-token', async () => {
+  const paths = tmpPaths();
+  const provider = { name: 'notion', tokenPrefix: 'NOTION', createClient: async () => ({}), validateToken: async () => ({ ok: true }) };
+  await assert.rejects(
+    () => connectionAdd(paths, ['--remote', 'notion', '--remote-token', 't'], { getProvider: () => provider }),
+    /--name이 필요/,
+  );
+  await assert.rejects(
+    () => connectionAdd(paths, ['--remote', 'notion', '--name', 'x'], { getProvider: () => provider }),
+    /--remote-token이 필요/,
+  );
+});
+
+test('connection add does not store the token when validation fails', async () => {
+  const paths = tmpPaths();
+  const provider = {
+    name: 'notion', tokenPrefix: 'NOTION',
+    createClient: async () => ({}),
+    validateToken: async () => { throw new Error('Notion 토큰 검증 실패 — unauthorized'); },
+  };
+  await assert.rejects(
+    () => connectionAdd(paths, ['--remote', 'notion', '--name', 'bad', '--remote-token', 'nope'], { getProvider: () => provider }),
+    /토큰 검증 실패/,
+  );
+  assert.equal(getConnectionToken(paths.secrets, 'notion', 'bad'), undefined);
+});
+
+test('connection remove (non-TTY) needs --force and then deletes the token', async () => {
+  const paths = tmpPaths();
+  const provider = { name: 'notion', tokenPrefix: 'NOTION' };
+  addConnection(paths.secrets, 'notion', 'work', { token: 'secret_w' });
+  // --force 없이는 거부한다.
+  await assert.rejects(
+    () => connectionRemove(paths, ['work', '--remote', 'notion'], { getProvider: () => provider }),
+    /--force/,
+  );
+  assert.equal(getConnectionToken(paths.secrets, 'notion', 'work'), 'secret_w');
+  // --force면 삭제한다.
+  const removed = await connectionRemove(paths, ['work', '--remote', 'notion', '--force'], { getProvider: () => provider });
+  assert.equal(removed, true);
+  assert.equal(getConnectionToken(paths.secrets, 'notion', 'work'), undefined);
+});
+
+test('connection remove warns (non-TTY) when a vault still references it but still removes with --force', async () => {
+  const paths = tmpPaths();
+  const vaultPath = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-connuse-'));
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath, kind: 'open' }]);
+  await configureRemote(paths, { name: 'personal', path: vaultPath, kind: 'open' },
+    { remote: 'notion', connection: 'shared', 'remote-token': 'secret_s', 'publish-db': 'db1' },
+    { getProvider: () => stubProvider([]) });
+  const provider = { name: 'notion', tokenPrefix: 'NOTION' };
+  const removed = await connectionRemove(paths, ['shared', '--remote', 'notion', '--force'], { getProvider: () => provider });
+  assert.equal(removed, true);
+  assert.equal(getConnectionToken(paths.secrets, 'notion', 'shared'), undefined);
+  // 설정 엔트리는 그대로 남는다(연결만 사라진다).
+  assert.equal(loadRemoteConfig(paths.publish, 'personal').connection, 'shared');
 });

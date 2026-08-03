@@ -194,15 +194,19 @@ Obsidian properties UI와 호환되도록 `tags`, `aliases`, `sources` 등 리�
 ### Publish (원격 발행)
 
 로컬 위키를 원격 저장소에서 보여주기 위한 **단방향(local→원격)** 발행이다. 실제 diff·push는
-결정론 도구 `llmwiki publish [vault]`가 담당한다(에이전트가 블록을 손으로 옮기지 않는다). 원격 대상은
-`_meta/remote.json`의 `provider`로 결정한다(현재 Notion, 추가 가능).
+결정론 도구 `llmwiki publish [vault]`가 담당한다(에이전트가 블록을 손으로 옮기지 않는다). 발행 설정은
+볼트와 분리돼 전역 `publish.json`에 볼트 이름으로 두고(`llmwiki publish add <vault>`), 원격 대상은
+그 엔트리의 `provider`로 결정한다(현재 Notion, 추가 가능).
 
 1. push 전 대상 페이지의 frontmatter·요약이 최신인지 확인한다(오래된 요약은 Lint로 먼저 정리).
-2. `kind: secure` 볼트는 `_meta/remote.json`에 `"allowPublish": true`가 있고 고객명·자격증명·내부 URL이
+2. `kind: secure` 볼트는 `publish.json` 엔트리에 `"allowPublish": true`가 있고 고객명·자격증명·내부 URL이
    익명화됐는지 확인한 뒤에만 발행한다.
 3. `llmwiki publish <vault>` (또는 `--dry-run`으로 먼저 미리보기)로 push한다. 상태는
    `_meta/remote-map.json`에 기록되고, 원격→local 역방향이나 원격 페이지 삭제는 하지 않는다.
 4. `log.md`에 `publish` 엔트리를 남긴다.
+
+발행 행에는 `type`별 아이콘이 자동으로 붙고, 대상 DB의 뷰 탭(Table/Board/Gallery/List)은 첫 발행
+때 자동 생성된다(이후엔 건너뜀). 뷰를 다시 만들려면 `llmwiki publish view <vault>`로 강제 재생성한다.
 
 원격 대상·토큰 설정은 `WIKI-CLI.md § 보안 경계`의 원격 연동 규칙을 따른다(토큰은 환경 변수에만).
 

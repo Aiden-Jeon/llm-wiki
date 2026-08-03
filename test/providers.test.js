@@ -6,9 +6,14 @@ import path from 'node:path';
 import { getProvider, listProviders } from '../src/providers/index.js';
 import { resolveRemoteToken } from '../src/providers/token.js';
 import { loadRemoteConfig } from '../src/remote.js';
+import { addConnection } from '../src/secrets.js';
 
 function tmpVault() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-provider-'));
+}
+
+function tmpPublishPath() {
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-provider-')), 'publish.json');
 }
 
 test('getProvider returns a registered provider and rejects unknown names', () => {
@@ -35,21 +40,37 @@ test('resolveRemoteToken throws listing the checked env vars when none set', () 
   assert.throws(() => resolveRemoteToken({}, { prefix: 'NOTION', vaultName: 'work' }), /LLMWIKI_NOTION_TOKEN_WORK/);
 });
 
+test('resolveRemoteToken falls back to the secrets store when env is empty', () => {
+  const file = path.join(tmpVault(), 'secrets.json');
+  addConnection(file, 'notion', 'personal', { token: 'stored-token' });
+  assert.equal(
+    resolveRemoteToken({}, { prefix: 'NOTION', vaultName: 'personal', secretsPath: file, provider: 'notion' }),
+    'stored-token',
+  );
+});
+
+test('resolveRemoteToken lets env win over the secrets store', () => {
+  const file = path.join(tmpVault(), 'secrets.json');
+  addConnection(file, 'notion', 'personal', { token: 'stored-token' });
+  assert.equal(
+    resolveRemoteToken({ LLMWIKI_NOTION_TOKEN_PERSONAL: 'env-token' }, { prefix: 'NOTION', vaultName: 'personal', secretsPath: file, provider: 'notion' }),
+    'env-token',
+  );
+});
+
 test('loadRemoteConfig returns null when absent and defaults provider to notion', () => {
-  const vault = tmpVault();
-  assert.equal(loadRemoteConfig(vault), null);
-  fs.mkdirSync(path.join(vault, '_meta'), { recursive: true });
-  fs.writeFileSync(path.join(vault, '_meta', 'remote.json'), '{"publish":{"databaseId":"db"}}');
-  const config = loadRemoteConfig(vault);
+  const publishPath = tmpPublishPath();
+  assert.equal(loadRemoteConfig(publishPath, 'personal'), null);
+  fs.writeFileSync(publishPath, '{"version":1,"vaults":{"personal":{"publish":{"databaseId":"db"}}}}');
+  const config = loadRemoteConfig(publishPath, 'personal');
   assert.equal(config.provider, 'notion');
   assert.equal(config.publish.databaseId, 'db');
 });
 
 test('loadRemoteConfig keeps an explicit provider and raises on invalid JSON', () => {
-  const vault = tmpVault();
-  fs.mkdirSync(path.join(vault, '_meta'), { recursive: true });
-  fs.writeFileSync(path.join(vault, '_meta', 'remote.json'), '{"provider":"confluence"}');
-  assert.equal(loadRemoteConfig(vault).provider, 'confluence');
-  fs.writeFileSync(path.join(vault, '_meta', 'remote.json'), '{bad');
-  assert.throws(() => loadRemoteConfig(vault), /파싱 실패/);
+  const publishPath = tmpPublishPath();
+  fs.writeFileSync(publishPath, '{"version":1,"vaults":{"personal":{"provider":"confluence"}}}');
+  assert.equal(loadRemoteConfig(publishPath, 'personal').provider, 'confluence');
+  fs.writeFileSync(publishPath, '{bad');
+  assert.throws(() => loadRemoteConfig(publishPath, 'personal'), /파싱 실패/);
 });
