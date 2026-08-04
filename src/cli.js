@@ -80,6 +80,7 @@ import {
   ensureRegistry,
   chooseVault,
   chooseName,
+  askText,
   splitCommand,
   openInEditor,
 } from './prompts.js';
@@ -619,12 +620,13 @@ async function setAgent(paths, name, commandTokens) {
     );
     if (!name) return;
     if (!command.length) {
-      const entered = await p.text({
+      const entered = await askText({
         message: `${name}을 실행할 명령`,
         placeholder: name === 'codex' ? 'dbexec repo run isaac' : 'vibe agent',
         validate(value) { if (!value.trim()) return '실행 명령을 입력하세요.'; },
       });
-      if (cancelPrompt(entered)) return;
+      if (entered === null) return;
+      // 따옴표를 포함할 수 있으므로 셸과 같은 규칙으로 토큰화한다(예: `mycli "my arg"`).
       command = splitCommand(entered.trim());
     }
   }

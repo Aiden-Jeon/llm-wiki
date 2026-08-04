@@ -21,7 +21,7 @@ import {
 import { spawnSync } from 'node:child_process';
 import { getPaths } from '../src/paths.js';
 import { writeRegistry, readRegistry, readAgents } from '../src/registry.js';
-import { setSelectForTest } from '../src/prompts.js';
+import { setSelectForTest, setTextForTest } from '../src/prompts.js';
 import { createSkill } from '../src/skills.js';
 import { isGitAvailable } from '../src/git.js';
 import { getConnectionToken, addConnection, listConnections } from '../src/secrets.js';
@@ -133,18 +133,26 @@ test('name-less subcommands still error in non-TTY instead of hanging on a picke
  * "무엇이 선택지로 제시되는지"와 "선택 결과가 어떻게 쓰이는지"를 검증한다.
  * onSelect(options, message) → 고를 value (null이면 취소).
  */
-async function withPicker(onSelect, fn) {
+async function withPicker(onSelect, fn, onText) {
   const descriptor = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
   Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
   const seen = [];
+  const texts = [];
   setSelectForTest((options, message) => {
     seen.push({ message, values: options.map((o) => o.value), options });
     return onSelect(options, message);
   });
+  if (onText) {
+    setTextForTest((opts) => {
+      texts.push(opts);
+      return onText(opts);
+    });
+  }
   try {
-    return { result: await fn(), seen };
+    return { result: await fn(), seen, texts };
   } finally {
     setSelectForTest(null);
+    setTextForTest(null);
     if (descriptor) Object.defineProperty(process.stdin, 'isTTY', descriptor);
     else delete process.stdin.isTTY;
   }
@@ -212,6 +220,126 @@ test('agent reset picker offers only agents with a custom override, and applies 
     assert.equal(readAgents(paths.registry).length, 0, '선택한 에이전트가 실제로 초기화된다');
   } finally {
     console.log = origLog;
+    if (prev.c === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prev.c;
+    if (prev.d === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prev.d;
+  }
+});
+
+/**
+ * `agent set`은 이름을 생략하면 실행 명령도 반드시 비어 있다(dispatch가 첫 토큰을 이름으로
+ * 잡으므로). 따라서 에이전트 선택 → 명령 입력까지 이어져야 완주한다. 이 흐름을 고정한다.
+ */
+test('agent set picker asks for the command and saves the tokenized result', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-pick-set-'));
+  const paths = getPaths({ LLM_WIKI_CONFIG_HOME: path.join(root, 'config'), LLM_WIKI_DATA_HOME: path.join(root, 'data') });
+
+  const prev = { c: process.env.LLM_WIKI_CONFIG_HOME, d: process.env.LLM_WIKI_DATA_HOME };
+  process.env.LLM_WIKI_CONFIG_HOME = path.join(root, 'config');
+  process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
+  const origLog = console.log;
+  console.log = () => {};
+  try {
+    const { seen, texts } = await withPicker(
+      () => 'codex',
+      () => main(['agent', 'set']),
+      () => 'dbexec repo run isaac',
+    );
+    assert.deepEqual(seen[0].values, ['claude', 'codex']);
+    assert.equal(texts.length, 1, '에이전트를 고른 뒤 실행 명령을 물어본다');
+    assert.match(texts[0].message, /codex/);
+
+    const agents = readAgents(paths.registry);
+    assert.equal(agents.length, 1);
+    assert.equal(agents[0].name, 'codex');
+    assert.equal(agents[0].command, 'dbexec repo run isaac');
+    assert.equal(agents[0].addDir, false, '커스텀 명령은 기본적으로 --add-dir를 붙이지 않는다');
+  } finally {
+    console.log = origLog;
+    if (prev.c === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prev.c;
+    if (prev.d === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prev.d;
+  }
+});
+
+test('agent set tokenizes a quoted command from the prompt', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-pick-quote-'));
+  const paths = getPaths({ LLM_WIKI_CONFIG_HOME: path.join(root, 'config'), LLM_WIKI_DATA_HOME: path.join(root, 'data') });
+
+  const prev = { c: process.env.LLM_WIKI_CONFIG_HOME, d: process.env.LLM_WIKI_DATA_HOME };
+  process.env.LLM_WIKI_CONFIG_HOME = path.join(root, 'config');
+  process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
+  const origLog = console.log;
+  console.log = () => {};
+  try {
+    // 공백이 든 인자는 따옴표로 묶어 입력한다 → 하나의 토큰으로 보존돼야 한다.
+    await withPicker(() => 'claude', () => main(['agent', 'set']), () => 'mycli "my arg" tail');
+    const agents = readAgents(paths.registry);
+    assert.equal(agents[0].command, 'mycli "my arg" tail');
+  } finally {
+    console.log = origLog;
+    if (prev.c === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prev.c;
+    if (prev.d === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prev.d;
+  }
+});
+
+test('agent set rejects a blank command and saves nothing', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-pick-blank-'));
+  const paths = getPaths({ LLM_WIKI_CONFIG_HOME: path.join(root, 'config'), LLM_WIKI_DATA_HOME: path.join(root, 'data') });
+
+  const prev = { c: process.env.LLM_WIKI_CONFIG_HOME, d: process.env.LLM_WIKI_DATA_HOME };
+  process.env.LLM_WIKI_CONFIG_HOME = path.join(root, 'config');
+  process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
+  try {
+    await assert.rejects(
+      withPicker(() => 'claude', () => main(['agent', 'set']), () => '   '),
+      /실행 명령을 입력하세요/,
+    );
+    assert.equal(readAgents(paths.registry).length, 0);
+  } finally {
+    if (prev.c === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prev.c;
+    if (prev.d === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prev.d;
+  }
+});
+
+test('agent set keeps a command passed as arguments without prompting', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-pick-args-'));
+  const paths = getPaths({ LLM_WIKI_CONFIG_HOME: path.join(root, 'config'), LLM_WIKI_DATA_HOME: path.join(root, 'data') });
+
+  const prev = { c: process.env.LLM_WIKI_CONFIG_HOME, d: process.env.LLM_WIKI_DATA_HOME };
+  process.env.LLM_WIKI_CONFIG_HOME = path.join(root, 'config');
+  process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
+  const origLog = console.log;
+  console.log = () => {};
+  try {
+    // 이름을 명시하면 picker도 text 프롬프트도 뜨지 않아야 한다(--add-dir는 그대로 해석).
+    const { seen, texts } = await withPicker(
+      () => assert.fail('picker가 뜨면 안 된다'),
+      () => main(['agent', 'set', 'codex', '--add-dir', 'mycli']),
+      () => assert.fail('text 프롬프트가 뜨면 안 된다'),
+    );
+    assert.equal(seen.length, 0);
+    assert.equal(texts.length, 0);
+    const agents = readAgents(paths.registry);
+    assert.equal(agents[0].command, 'mycli');
+    assert.equal(agents[0].addDir, true);
+  } finally {
+    console.log = origLog;
+    if (prev.c === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prev.c;
+    if (prev.d === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prev.d;
+  }
+});
+
+test('cancelling the agent set command prompt saves nothing', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-pick-setcancel-'));
+  const paths = getPaths({ LLM_WIKI_CONFIG_HOME: path.join(root, 'config'), LLM_WIKI_DATA_HOME: path.join(root, 'data') });
+
+  const prev = { c: process.env.LLM_WIKI_CONFIG_HOME, d: process.env.LLM_WIKI_DATA_HOME };
+  process.env.LLM_WIKI_CONFIG_HOME = path.join(root, 'config');
+  process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
+  try {
+    // 명령 입력에서 취소(null)하면 에이전트는 저장되지 않는다.
+    await withPicker(() => 'claude', () => main(['agent', 'set']), () => null);
+    assert.equal(readAgents(paths.registry).length, 0);
+  } finally {
     if (prev.c === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prev.c;
     if (prev.d === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prev.d;
   }

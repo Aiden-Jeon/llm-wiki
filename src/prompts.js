@@ -99,6 +99,28 @@ async function select(options, message) {
   return value;
 }
 
+/**
+ * p.text를 감싸는 테스트 seam. select와 같은 이유로 둔다.
+ * validate는 p.text와 같은 계약(문제가 있으면 메시지 문자열 반환)이며,
+ * 주입된 구현에도 적용해 테스트가 실제 검증 규칙을 함께 통과하게 한다.
+ * null을 반환하면 취소와 같게 처리된다.
+ */
+let textImpl = null;
+export function setTextForTest(fn) { textImpl = fn; }
+
+export async function askText({ message, placeholder, validate } = {}) {
+  if (textImpl) {
+    const entered = await textImpl({ message, placeholder });
+    if (entered === null || entered === undefined) return null;
+    const problem = validate ? validate(entered) : undefined;
+    if (problem) throw new Error(problem);
+    return entered;
+  }
+  const value = await p.text({ message, placeholder, validate });
+  if (cancelPrompt(value)) return null;
+  return value;
+}
+
 export async function chooseVault(vaults, message) {
   const name = await select(
     vaults.map((vault) => ({ value: vault.name, label: vault.name, hint: vault.signals || undefined })),
