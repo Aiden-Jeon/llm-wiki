@@ -153,10 +153,12 @@ CLI는 볼트 목록을 **레지스트리 파일**에서 읽는다. 경로를 �
 1. `llmwiki skill lint [name] [--json]` — 결정론 계약 검사 도구. `SKILL.md`의 frontmatter·필수 섹션·
    플레이스홀더 잔존·이식성을 검사한다(실행을 막는 위반은 `error`, 품질 휴리스틱은 `warn`).
    워크플로우가 아니라 `llmwiki vault lint`·`llmwiki doctor`와 같은 진단 도구다.
+   `doctor`는 같은 검사를 개수로 요약하되 `warn`까지만 올린다 — 계약 미충족은 실행을 막지 않으므로
+   실행 준비 점검(`doctor`)과 계약 검사(`skill lint`)를 분리한다.
 2. 의도 인터뷰, 볼트 근거 소스 실사, 초안 작성, dry-run 검증은 `.claude/commands/skill-author.md`가
    정본이다(Codex는 `AGENTS.md`의 skill-author 태스크). 여기서 스텝을 재기술하지 않는다.
 3. 스캐폴딩·가져오기만 필요하면 결정론 경로인 `llmwiki skill add`를 쓴다. 스켈레톤은 의도적으로
-   `TODO`를 남겨 두므로 채우기 전까지 `skill lint`가 `error`를 보고한다.
+   줄머리 `TODO:` 표기를 남겨 두므로 채우기 전까지 `skill lint`가 `error`를 보고한다.
 
 두 진입점은 같은 워크플로우로 수렴한다: 터미널에서 `llmwiki skill new [name]`, 세션 안에서
 `/skill-author [요청]`.

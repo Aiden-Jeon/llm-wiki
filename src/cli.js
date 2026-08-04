@@ -713,7 +713,8 @@ function listSkillsCommand(paths, args = []) {
 }
 
 // 대화형 `skill add`의 "시작 방법" 선택에서 에이전트 authoring으로 넘어가는 센티넬.
-const AUTHOR_WITH_AGENT = ' author';
+// 스킬 이름 규칙(소문자·숫자·-)이 거부하는 형태라 실제 이름과 겹칠 수 없다.
+const AUTHOR_WITH_AGENT = '__author__';
 
 async function addSkill(paths, args, { outro = true, allowAuthoring = true } = {}) {
   const { options, rest } = parseOptions(args, {
@@ -883,7 +884,7 @@ function lintSkillsCommand(paths, args = []) {
   if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${SKILL_LINT_USAGE}`);
 
   const targets = rest[0]
-    ? [{ name: validateSkillName(rest[0]), dir: skillDir(paths.skillsDir, rest[0]) }]
+    ? [{ name: parseSkillName(rest[0]), dir: existingSkillDir(paths.skillsDir, rest[0]) }]
     : listSkills(paths.skillsDir).map((skill) => ({ name: skill.name, dir: skill.dir }));
   if (rest[0] && !fs.existsSync(targets[0].dir)) throw new Error(`등록되지 않은 스킬입니다: ${targets[0].name}`);
 
@@ -995,7 +996,9 @@ function syncSkills(paths) {
     fs.cpSync(skill.dir, path.join(skillsDest, skill.name), { recursive: true });
     fs.writeFileSync(path.join(commandsDir, `${skill.name}.md`), renderCommandStub(skill));
     published.push(skill);
-    if (skill.issues.length) warnings.push(`${skill.name}: ${skill.issues.join(' / ')}`);
+    // 계약을 다 못 채운 스킬도 동기화는 한다(쓰던 스킬이 갑자기 사라지면 안 된다). 알림만 남긴다.
+    const summary = skillFindingSummary(skill.dir);
+    if (summary) warnings.push(`${skill.name}: ${summary} · llmwiki skill lint ${skill.name}`);
   }
 
   fs.writeFileSync(path.join(paths.workspace, 'SKILLS.md'), renderSkillsCatalog(published));
@@ -1088,15 +1091,12 @@ function doctor(paths) {
   const skills = listSkills(paths.skillsDir);
   if (!skills.length) add('info', '커스텀 스킬', `없음 · 필요하면 llmwiki skill new <name> (${paths.skillsDir})`);
   for (const skill of skills) {
-    // doctor는 개수 요약만 낸다. 항목별 상세는 `llmwiki skill lint <name>`이 담당한다.
-    const findings = lintSkill(skill.dir);
-    const errors = findings.filter((finding) => finding.level === 'error').length;
-    const warnings = findings.filter((finding) => finding.level === 'warn').length;
-    if (!errors && !warnings) add('success', `스킬 ${skill.name}`, skill.description);
-    else {
-      const counts = [errors && `위반 ${errors}개`, warnings && `경고 ${warnings}개`].filter(Boolean).join(' · ');
-      add(errors ? 'error' : 'warn', `스킬 ${skill.name}`, `${counts} · llmwiki skill lint ${skill.name}`);
-    }
+    // doctor는 실행 준비 상태를 보는 명령이고, 계약을 덜 채운 스킬은 실행을 막지 않는다.
+    // 그래서 여기서는 warn까지만 올리고(종료 코드 유지), error 판정은 `skill lint`가 낸다.
+    // 개수 요약만 내고 항목별 상세도 그 명령에 위임한다.
+    const summary = skillFindingSummary(skill.dir);
+    if (!summary) add('success', `스킬 ${skill.name}`, skill.description);
+    else add('warn', `스킬 ${skill.name}`, `${summary} · llmwiki skill lint ${skill.name}`);
   }
 
   const labels = { claude: 'Claude Code', codex: 'Codex' };

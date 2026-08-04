@@ -92,9 +92,10 @@ skill add 옵션:
 
 SKILL.md 계약 (llmwiki skill lint):
   error  frontmatter name(디렉터리명과 일치)·description, ## 근거 소스, ## 워크플로우,
-         남아 있는 TODO/FIXME 플레이스홀더, 예약된 이름(wiki-*)
+         남아 있는 줄머리 TODO:/FIXME: 표기, 예약된 이름(wiki-*, skill-author)
   warn   너무 짧은 description, 트리거 발화 예시 없음, ## 입력·## 주의 누락,
          머신 의존 절대 경로, 볼트 라우팅 언급 없음
+  예시용 코드블록은 판정에서 제외합니다. doctor는 같은 검사를 warn까지만 올립니다.
 
 추가 정보:
   signals 요청을 이 볼트로 자동 연결할 주제·키워드 (예: 커리어, 이력서, 논문)

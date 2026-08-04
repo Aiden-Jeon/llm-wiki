@@ -141,7 +141,7 @@ llmwiki skill add weekly-retro \
 llmwiki skill add paper-review --from ~/skills/paper-review
 ```
 
-스켈레톤은 모든 지시문에 `TODO`를 남겨 두므로, 채우기 전까지 `llmwiki skill lint`가 `error`를 보고합니다. 생성 직후에도 미충족 항목 수를 함께 안내합니다.
+스켈레톤은 모든 지시문을 줄머리 `TODO:`로 남겨 두므로, 채우기 전까지 `llmwiki skill lint`가 `error`를 보고합니다. 생성 직후에도 미충족 항목 수를 함께 안내합니다. 검사는 이 표기 형태만 잡으므로, TODO 정리가 *주제*인 스킬은 본문에서 TODO를 자유롭게 언급할 수 있습니다.
 
 ### 검사와 관리
 
@@ -154,11 +154,11 @@ llmwiki skill edit weekly-retro
 llmwiki skill remove weekly-retro
 ```
 
-`llmwiki skill lint`는 `llmwiki vault lint`와 같은 계층의 결정론 도구입니다. `error`가 있으면 종료 코드 1을 반환하고, `llmwiki doctor`도 같은 검사 결과를 요약해 보여 줍니다.
+`llmwiki skill lint`는 `llmwiki vault lint`와 같은 계층의 결정론 도구입니다. `error`가 있으면 종료 코드 1을 반환합니다. `llmwiki doctor`도 같은 검사 결과를 개수로 요약하지만, 계약을 덜 채운 스킬이 실행을 막는 것은 아니므로 `warn`까지만 올리고 종료 코드를 바꾸지 않습니다(실행 준비 점검과 계약 검사를 분리).
 
 | 수준 | 검사 항목 |
 |---|---|
-| `error` | frontmatter `name`(디렉터리명과 일치)·`description`, `## 근거 소스`·`## 워크플로우` 섹션, 남아 있는 `TODO`/`FIXME`, 예약된 이름 |
+| `error` | frontmatter `name`(디렉터리명과 일치)·`description`, `## 근거 소스`·`## 워크플로우` 섹션, 남아 있는 `TODO:`/`FIXME:` 표기, 예약된 이름 |
 | `warn` | 너무 짧은 `description`, 트리거 발화 예시 없음, `## 입력`·`## 주의` 누락, 머신 의존 절대 경로, 볼트 라우팅 언급 없음 |
 
 스킬 원본 위치는 `llmwiki skill path [name]`으로 확인할 수 있습니다. 이름은 `wiki-add`, `wiki-search`, `wiki-use`, `wiki-lint`, `skill-author`와 중복할 수 없습니다.

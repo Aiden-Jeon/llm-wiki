@@ -6,12 +6,22 @@ export const SKILL_FILE = 'SKILL.md';
 export const RESERVED_SKILL_NAMES = ['wiki-add', 'wiki-search', 'wiki-use', 'wiki-lint', 'skill-author'];
 const NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 
-export function validateSkillName(value) {
+/**
+ * 스킬 이름의 형식만 검증한다(경로 조작 방지 포함). 예약 이름은 거부하지 **않는다** —
+ * 진단 명령(`skill lint`)은 이미 만들어진 예약 이름 스킬도 검사할 수 있어야 한다.
+ */
+export function parseSkillName(value) {
   const name = String(value ?? '').trim();
   if (!name) throw new Error('스킬 이름이 필요합니다.');
   if (!NAME_PATTERN.test(name)) {
     throw new Error('스킬 이름은 소문자/숫자로 시작하고 소문자, 숫자, - 만 사용할 수 있습니다.');
   }
+  return name;
+}
+
+/** 새 스킬을 만들 때 쓰는 검증. 형식 + 예약 이름을 모두 거부한다. */
+export function validateSkillName(value) {
+  const name = parseSkillName(value);
   if (RESERVED_SKILL_NAMES.includes(name)) {
     throw new Error(`내장 명령과 같은 이름은 사용할 수 없습니다: ${name}`);
   }
@@ -47,21 +57,17 @@ export function parseSkillFrontmatter(content) {
   return { fields, body: content.slice(match[0].length).trim() };
 }
 
+/**
+ * 스킬의 신원(이름·설명·경로)만 읽는다. 계약 위반 판정은 `lintSkill`이 단독으로 담당한다
+ * — 두 곳에서 판정하면 표면마다 다른 답을 내놓는다(`skill show` vs `skill lint`).
+ */
 export function readSkill(dir) {
   const name = path.basename(dir);
   const file = path.join(dir, SKILL_FILE);
-  const issues = [];
-  if (!fs.existsSync(file)) {
-    return { name, dir, file, description: '', issues: [`${SKILL_FILE} 파일이 없습니다.`] };
-  }
+  if (!fs.existsSync(file)) return { name, dir, file, description: '' };
 
   const { fields } = parseSkillFrontmatter(fs.readFileSync(file, 'utf8'));
-  if (!fields.description) issues.push('프론트매터에 description이 없습니다. 에이전트가 스킬을 언제 쓸지 판단할 수 없습니다.');
-  if (fields.name && fields.name !== name) issues.push(`프론트매터 name(${fields.name})이 디렉터리 이름(${name})과 다릅니다.`);
-  if (RESERVED_SKILL_NAMES.includes(name)) issues.push('내장 명령과 이름이 겹칩니다. 다른 이름으로 바꾸세요.');
-  if (!NAME_PATTERN.test(name)) issues.push('스킬 이름은 소문자/숫자와 - 만 사용할 수 있습니다.');
-
-  return { name, dir, file, description: fields.description ?? '', issues };
+  return { name, dir, file, description: fields.description ?? '' };
 }
 
 // SKILL.md 계약. `templates/skills/`의 스켈레톤과 `.claude/commands/skill-author.md`가 같은
@@ -74,10 +80,19 @@ export const SKILL_RECOMMENDED_SECTIONS = [['입력', '디스패처'], ['주의'
 const DESCRIPTION_MIN_LENGTH = 40;
 // 본문이 이보다 짧으면 실행 가능한 워크플로우라기보다 제목 모음이다.
 const BODY_MIN_LENGTH = 200;
-// 스켈레톤은 모든 지시문에 TODO를 달아 두므로, 편집 전 스킬을 결정론적으로 걸러낼 수 있다.
-const PLACEHOLDER_PATTERN = /TODO|FIXME/i;
+// 스켈레톤이 남기는 표기(줄머리 `TODO:`)만 잡는다. TODO 정리가 주제인 스킬을 막지 않으려면
+// 단어 등장이 아니라 이 형태에 앵커링해야 한다.
+const PLACEHOLDER_PATTERN = /^\s*(?:[-*>]\s*)?(TODO|FIXME)\s*:/im;
 // 머신 의존 경로. 볼트 경로는 레지스트리에서 해소해야 하며 스킬에 박으면 다른 머신에서 깨진다.
 const ABSOLUTE_PATH_PATTERN = /(^|[\s`(])(\/Users\/|\/home\/|~\/|[A-Z]:\\)/m;
+
+/**
+ * 펜스 코드블록을 제거한다. 스킬은 계약 예시·출력 예시를 코드블록으로 보여주는 일이 많아,
+ * 그 안의 헤딩이 섹션으로 집계되거나 예시 경로가 이식성 위반으로 잡히면 안 된다.
+ */
+function stripFencedBlocks(body) {
+  return body.replace(/^[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*?^[ \t]*\1[^\n]*$/gm, '');
+}
 
 function bodySections(body) {
   return [...body.matchAll(/^#{2,3}\s+(.+?)\s*$/gm)].map((match) => match[1]);
@@ -128,7 +143,10 @@ export function lintSkill(dir) {
   }
 
   // 3. 본문 계약 (error/warn)
-  const sections = bodySections(body);
+  // 예시용 코드블록은 계약 판정에서 제외한다 — 그 안의 헤딩은 실제 섹션이 아니고,
+  // 예시 경로는 이 스킬이 실제로 참조하는 경로가 아니다.
+  const prose = stripFencedBlocks(body);
+  const sections = bodySections(prose);
   const has = (titles) => titles.some((title) => sections.some((section) => section.includes(title)));
   const label = (titles) => titles.map((title) => `## ${title}`).join(' 또는 ');
   for (const titles of SKILL_REQUIRED_SECTIONS) {
@@ -138,10 +156,10 @@ export function lintSkill(dir) {
     if (!has(titles)) add('warn', '섹션', `권장 섹션 없음: ${label(titles)}`);
   }
   if (body.length < BODY_MIN_LENGTH) add('warn', '본문', `본문이 ${body.length}자입니다. 실행 가능한 워크플로우로 보기 어렵습니다.`);
-  if (PLACEHOLDER_PATTERN.test(body)) add('error', '본문', '템플릿 플레이스홀더가 남아 있습니다. 실제 워크플로우로 채우세요.');
+  if (PLACEHOLDER_PATTERN.test(prose)) add('error', '본문', '템플릿 플레이스홀더가 남아 있습니다. 실제 워크플로우로 채우세요.');
 
   // 4. 이식성 (warn) — 경로·볼트는 레지스트리에서 해소해야 한다.
-  if (ABSOLUTE_PATH_PATTERN.test(body)) {
+  if (ABSOLUTE_PATH_PATTERN.test(prose)) {
     add('warn', '이식성', '머신 의존 절대 경로가 있습니다. 볼트 경로는 레지스트리(wikis.local.md)로 해소하세요.');
   }
   if (!/WIKI-CLI\.md|볼트/.test(body)) {
@@ -199,8 +217,9 @@ TODO: 위 스텝을 이 스킬의 실제 절차로 바꾼다.
 
 - 근거에 없는 내용을 만들지 않는다.
 
-> 이 파일은 스켈레톤이다. \`llmwiki skill lint ${name}\`이 TODO가 남아 있는 동안 error를 보고한다.
-> 에이전트와 함께 채우려면 \`llmwiki skill new ${name}\`을 실행한다.
+TODO: 이 스켈레톤을 다 채웠으면 이 줄과 위의 TODO 줄들을 지운다.
+남아 있는 동안 \`llmwiki skill lint ${name}\`이 error를 보고한다.
+에이전트와 함께 채우려면 \`llmwiki skill new ${name}\`을 실행한다.
 `;
 }
 
@@ -260,8 +279,14 @@ function alignSkillName(file, name) {
   fs.writeFileSync(file, content.replace(/^(\s*name\s*:).*$/m, `$1 ${name}`));
 }
 
+/** 생성·수정 경로용. 예약 이름을 거부한다. */
 export function skillDir(skillsDir, name) {
   return path.join(skillsDir, validateSkillName(name));
+}
+
+/** 진단·조회 경로용. 이미 존재하는 예약 이름 스킬도 가리킬 수 있다. */
+export function existingSkillDir(skillsDir, name) {
+  return path.join(skillsDir, parseSkillName(name));
 }
 
 export function createSkill(skillsDir, { name, description = '', from, force = false } = {}) {
@@ -304,8 +329,9 @@ export function createSkill(skillsDir, { name, description = '', from, force = f
   return { dir, existed };
 }
 
+// 삭제는 예약 이름도 대상이다 — 이름이 겹쳐 생략되는 스킬을 지울 수 없으면 막힌다.
 export function removeSkill(skillsDir, name) {
-  const dir = skillDir(skillsDir, name);
+  const dir = existingSkillDir(skillsDir, name);
   if (!fs.existsSync(dir)) throw new Error(`등록되지 않은 스킬입니다: ${path.basename(dir)}`);
   fs.rmSync(dir, { recursive: true, force: true });
   return dir;

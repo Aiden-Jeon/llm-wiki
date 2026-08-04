@@ -103,6 +103,31 @@ test('buildSkillAuthorPrompt routes to skill-author and tolerates an empty reque
   assert.equal(buildSkillAuthorPrompt('codex', '  '), 'skill-author 태스크를 실행한다.');
 });
 
+// doctor는 실행 준비 상태 점검이다. 계약을 덜 채운 스킬은 실행을 막지 않으므로,
+// 업그레이드만으로 doctor가 종료 코드 1이 되어서는 안 된다(기존 스킬 회귀 방지).
+test('doctor keeps exit code 0 for a skill that only fails the contract', async () => {
+  const paths = tmpPaths();
+  const vaultPath = path.join(path.dirname(paths.registry), 'vault');
+  fs.mkdirSync(vaultPath, { recursive: true });
+  fs.writeFileSync(path.join(vaultPath, 'index.md'), '# vault');
+  fs.writeFileSync(path.join(vaultPath, 'CLAUDE.md'), '# vault');
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath }]);
+  createSkill(paths.skillsDir, { name: 'half-done', description: 'x' });
+
+  const prev = { c: process.env.LLM_WIKI_CONFIG_HOME, d: process.env.LLM_WIKI_DATA_HOME, code: process.exitCode };
+  process.env.LLM_WIKI_CONFIG_HOME = paths.configDir;
+  process.env.LLM_WIKI_DATA_HOME = path.dirname(paths.workspace);
+  process.exitCode = undefined;
+  try {
+    await main(['doctor']);
+    assert.ok(!process.exitCode, `doctor should not fail on contract findings, got exit ${process.exitCode}`);
+  } finally {
+    process.env.LLM_WIKI_CONFIG_HOME = prev.c;
+    process.env.LLM_WIKI_DATA_HOME = prev.d;
+    process.exitCode = prev.code;
+  }
+});
+
 test('main rejects unknown commands and bad inbox subcommands', async () => {
   await assert.rejects(main(['bogus']), /알 수 없는 명령: bogus/);
   await assert.rejects(main(['inbox', 'push']), /llmwiki inbox pull/);
