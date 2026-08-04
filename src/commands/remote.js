@@ -9,6 +9,7 @@ import {
   cancelPrompt,
   ensureRegistry,
   chooseVault,
+  chooseName,
 } from '../prompts.js';
 import { readRegistry } from '../registry.js';
 import { resolveCaptureVault } from '../capture.js';
@@ -628,12 +629,32 @@ export async function connectionRemove(paths, args, { getProvider: resolveProvid
     booleans: ['force'],
     usage: CONNECTION_REMOVE_USAGE,
   });
-  if (!rest.length) throw new Error(`삭제할 연결 이름이 필요합니다.\n사용법: ${CONNECTION_REMOVE_USAGE}`);
+  if (!rest.length && !stdin.isTTY) throw new Error(`삭제할 연결 이름이 필요합니다.\n사용법: ${CONNECTION_REMOVE_USAGE}`);
   if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${CONNECTION_REMOVE_USAGE}`);
   const tty = Boolean(stdin.isTTY);
   const provider = await resolveConnectionProvider(options, tty, resolveProvider);
   if (!provider) return false;
-  const name = normalizeConnectionName(rest[0]);
+  let name;
+  if (rest.length) {
+    name = normalizeConnectionName(rest[0]);
+  } else {
+    // 이름을 안 주면 이 provider에 저장된 연결 목록에서 고르게 한다.
+    const saved = listConnections(paths.secrets, provider.name);
+    if (!saved.length) {
+      const note = `${provider.name}에 저장된 연결이 없습니다. \`llmwiki connection add\`로 추가하세요.`;
+      p.log.warn(note);
+      return false;
+    }
+    const usage = connectionUsage(paths);
+    name = await chooseName(
+      saved.map((c) => ({
+        value: c.name,
+        hint: [c.account, (usage.get(`${provider.name}:${c.name}`) || []).join(', ')].filter(Boolean).join(' · ') || undefined,
+      })),
+      '삭제할 연결을 선택하세요.',
+    );
+    if (!name) return false;
+  }
 
   const entry = getConnection(paths.secrets, provider.name, name);
   if (!entry) {

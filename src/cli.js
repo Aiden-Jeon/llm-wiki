@@ -79,6 +79,8 @@ import {
   inspectVault,
   ensureRegistry,
   chooseVault,
+  chooseName,
+  askText,
   splitCommand,
   openInEditor,
 } from './prompts.js';
@@ -350,12 +352,19 @@ function listVaults(paths, args = []) {
   }
 }
 
-function showVault(paths, name) {
-  if (!name) throw new Error('확인할 볼트 이름이 필요합니다.\n사용법: llmwiki vault show <name>');
+async function showVault(paths, name) {
   const { vaults, issues } = readRegistryFile(paths.registry);
   reportIssues(paths.registry, issues);
-  const vault = vaults.find((item) => item.name === name);
-  if (!vault) throw new Error(`등록되지 않은 볼트입니다: ${name}`);
+  let vault;
+  if (name) {
+    vault = vaults.find((item) => item.name === name);
+    if (!vault) throw new Error(`등록되지 않은 볼트입니다: ${name}`);
+  } else {
+    if (!stdin.isTTY) throw new Error('확인할 볼트 이름이 필요합니다.\n사용법: llmwiki vault show <name>');
+    if (!vaults.length) throw new Error('등록된 볼트가 없습니다. 먼저 `llmwiki vault add`로 볼트를 등록하세요.');
+    vault = await chooseVault(vaults, '확인할 볼트를 선택하세요.');
+    if (!vault) return false;
+  }
   const status = inspectVault(vault.path);
   const details = [
     `이름       ${vault.name}`,
@@ -370,13 +379,22 @@ function showVault(paths, name) {
   ].join('\n');
   if (stdin.isTTY) console.log(renderNote(details, '볼트 상세'));
   else console.log(details);
+  return true;
 }
 
 async function removeVault(paths, name, { confirm = false } = {}) {
-  if (!name) throw new Error('제거할 볼트 이름이 필요합니다.\n사용법: llmwiki vault remove <name>');
   const vaults = readRegistry(paths.registry);
-  const target = vaults.find((vault) => vault.name === name);
-  if (!target) throw new Error(`등록되지 않은 볼트입니다: ${name}`);
+  let target;
+  if (name) {
+    target = vaults.find((vault) => vault.name === name);
+    if (!target) throw new Error(`등록되지 않은 볼트입니다: ${name}`);
+  } else {
+    if (!stdin.isTTY) throw new Error('제거할 볼트 이름이 필요합니다.\n사용법: llmwiki vault remove <name>');
+    if (!vaults.length) throw new Error('등록된 볼트가 없습니다.');
+    target = await chooseVault(vaults, '제거할 볼트를 선택하세요.');
+    if (!target) return false;
+    name = target.name;
+  }
 
   if (stdin.isTTY && confirm) {
     const accepted = await p.confirm({ message: `${name} 볼트를 레지스트리에서 삭제할까요?`, initialValue: false });
@@ -487,8 +505,20 @@ async function syncVault(paths, args = []) {
   ensureRegistry(paths);
   const vaults = readRegistry(paths.registry);
   if (!vaults.length) throw new Error('등록된 볼트가 없습니다. 먼저 `llmwiki vault add`로 볼트를 등록하세요.');
-  const { vault, ambiguous } = resolveCaptureVault(vaults, rest[0]);
-  if (ambiguous) throw new Error(`대상 볼트를 지정하세요.\n사용법: ${VAULT_SYNC_USAGE}`);
+  let { vault, ambiguous } = resolveCaptureVault(vaults, rest[0]);
+  if (ambiguous) {
+    if (!stdin.isTTY) throw new Error(`대상 볼트를 지정하세요.\n사용법: ${VAULT_SYNC_USAGE}`);
+    // sync는 git 백엔드만 대상이므로 선택지도 git 볼트로 좁힌다.
+    const gitVaults = vaults.filter((item) => item.backend === 'git');
+    // 하나도 없으면 이름을 지정했을 때와 같은 info 경로로 흘린다(같은 상황에 같은 심각도).
+    if (!gitVaults.length) {
+      const message = 'git 백엔드 볼트가 없습니다. sync는 git 백엔드 볼트만 동기화합니다.';
+      p.log.info(message);
+      return false;
+    }
+    vault = await chooseVault(gitVaults, '동기화할 볼트를 선택하세요.');
+    if (!vault) return false;
+  }
 
   if (vault.backend !== 'git') {
     const message = `${vault.name}은 ${vault.backend} 백엔드라 sync 대상이 아닙니다. git 백엔드 볼트만 동기화합니다.`;
@@ -577,9 +607,29 @@ export function serializeCommand(tokens) {
   }).join(' ');
 }
 
-function setAgent(paths, name, commandTokens) {
-  if (!name) throw new Error('설정할 에이전트 이름이 필요합니다.\n사용법: llmwiki agent set <claude|codex> [--add-dir|--no-add-dir] <명령...>');
-  const { command, addDir } = extractAddDirFlag(commandTokens);
+async function setAgent(paths, name, commandTokens) {
+  // 이름을 생략하면 실행 명령도 함께 비어 있다(dispatch가 첫 토큰을 이름으로 잡으므로).
+  // 그래서 에이전트만 고르게 하면 곧바로 '실행 명령이 필요합니다'로 끝난다 → 명령까지 물어본다.
+  let { command, addDir } = extractAddDirFlag(commandTokens);
+  if (!name) {
+    if (!stdin.isTTY) throw new Error('설정할 에이전트 이름이 필요합니다.\n사용법: llmwiki agent set <claude|codex> [--add-dir|--no-add-dir] <명령...>');
+    const overrides = new Map(readAgents(paths.registry).map((agent) => [agent.name, agent]));
+    name = await chooseName(
+      SUPPORTED_AGENTS.map((value) => ({ value, hint: overrides.get(value) ? `현재: ${overrides.get(value).command}` : '기본값' })),
+      '설정할 에이전트를 선택하세요.',
+    );
+    if (!name) return;
+    if (!command.length) {
+      const entered = await askText({
+        message: `${name}을 실행할 명령`,
+        placeholder: name === 'codex' ? 'dbexec repo run isaac' : 'vibe agent',
+        validate(value) { if (!value.trim()) return '실행 명령을 입력하세요.'; },
+      });
+      if (entered === null) return;
+      // 따옴표를 포함할 수 있으므로 셸과 같은 규칙으로 토큰화한다(예: `mycli "my arg"`).
+      command = splitCommand(entered.trim());
+    }
+  }
   if (!command.length) throw new Error(`실행 명령이 필요합니다.\n사용법: llmwiki agent set ${name} <명령...>  (예: llmwiki agent set codex dbexec repo run isaac)`);
   // 커스텀 wrapper는 대개 --add-dir를 받지 않으므로 기본 off. 필요하면 --add-dir로 켠다.
   const agent = normalizeAgentCommand({ name, command: serializeCommand(command), addDir: addDir ?? false });
@@ -592,8 +642,15 @@ function setAgent(paths, name, commandTokens) {
   else console.log(message);
 }
 
-function resetAgent(paths, name) {
-  if (!name) throw new Error('초기화할 에이전트 이름이 필요합니다.\n사용법: llmwiki agent reset <claude|codex>');
+async function resetAgent(paths, name) {
+  if (!name) {
+    if (!stdin.isTTY) throw new Error('초기화할 에이전트 이름이 필요합니다.\n사용법: llmwiki agent reset <claude|codex>');
+    // 커스텀 설정이 있는 에이전트만 초기화 대상이다.
+    const overrides = readAgents(paths.registry).map((agent) => agent.name);
+    if (!overrides.length) throw new Error('커스텀 설정된 에이전트가 없습니다. 이미 모두 기본값입니다.');
+    name = await chooseName(overrides.map((value) => ({ value })), '초기화할 에이전트를 선택하세요.');
+    if (!name) return;
+  }
   if (!SUPPORTED_AGENTS.includes(name)) throw new Error(`agent는 ${SUPPORTED_AGENTS.join(' 또는 ')}여야 합니다.`);
   ensureRegistry(paths);
   const agents = readAgents(paths.registry);
@@ -724,10 +781,28 @@ async function addSkill(paths, args, { outro = true } = {}) {
   return true;
 }
 
-function showSkill(paths, name) {
-  if (!name) throw new Error('확인할 스킬 이름이 필요합니다.\n사용법: llmwiki skill show <name>');
-  const dir = skillDir(paths.skillsDir, name);
-  if (!fs.existsSync(dir)) throw new Error(`등록되지 않은 스킬입니다: ${name}`);
+/**
+ * 스킬 이름을 해소한다. 이름이 있으면 그대로 검증하고, 없으면 TTY에서 목록으로 고르게 한다.
+ * verb는 프롬프트·에러 문구에 쓰는 동작 이름('확인할' 등). 취소하면 null.
+ */
+async function resolveSkillName(paths, name, verb, usage) {
+  if (name) {
+    if (!fs.existsSync(skillDir(paths.skillsDir, name))) throw new Error(`등록되지 않은 스킬입니다: ${name}`);
+    return name;
+  }
+  if (!stdin.isTTY) throw new Error(`${verb} 스킬 이름이 필요합니다.\n사용법: ${usage}`);
+  const skills = listSkills(paths.skillsDir);
+  if (!skills.length) throw new Error('등록된 커스텀 스킬이 없습니다. `llmwiki skill add <name>`으로 만드세요.');
+  return chooseName(
+    skills.map((skill) => ({ value: skill.name, hint: skill.description || undefined })),
+    `${verb} 스킬을 선택하세요.`,
+  );
+}
+
+async function showSkill(paths, name) {
+  const target = await resolveSkillName(paths, name, '확인할', 'llmwiki skill show <name>');
+  if (!target) return false;
+  const dir = skillDir(paths.skillsDir, target);
   const skill = readSkill(dir);
   const details = [
     `이름   ${skill.name}`,
@@ -739,25 +814,30 @@ function showSkill(paths, name) {
   ].join('\n');
   if (stdin.isTTY) console.log(renderNote(details, '스킬 상세'));
   else console.log(details);
+  return true;
 }
 
-function editSkill(paths, name) {
-  if (!name) throw new Error('편집할 스킬 이름이 필요합니다.\n사용법: llmwiki skill edit <name>');
-  const file = path.join(skillDir(paths.skillsDir, name), SKILL_FILE);
-  if (!fs.existsSync(file)) throw new Error(`등록되지 않은 스킬입니다: ${name}`);
+async function editSkill(paths, name) {
+  const target = await resolveSkillName(paths, name, '편집할', 'llmwiki skill edit <name>');
+  if (!target) return false;
+  const file = path.join(skillDir(paths.skillsDir, target), SKILL_FILE);
+  // 디렉터리는 있지만 SKILL.md가 없는 스킬도 목록에 나온다(listSkills는 디렉터리만 본다).
+  // 목록에서 방금 고른 이름을 "등록되지 않았다"고 하면 모순이므로 실제 원인을 알린다.
+  if (!fs.existsSync(file)) throw new Error(`${target} 스킬에 ${SKILL_FILE}가 없습니다: ${file}`);
   openInEditor(file);
+  return true;
 }
 
 async function removeSkillCommand(paths, name) {
-  if (!name) throw new Error('삭제할 스킬 이름이 필요합니다.\n사용법: llmwiki skill remove <name>');
-  const dir = skillDir(paths.skillsDir, name);
-  if (!fs.existsSync(dir)) throw new Error(`등록되지 않은 스킬입니다: ${name}`);
+  const target = await resolveSkillName(paths, name, '삭제할', 'llmwiki skill remove <name>');
+  if (!target) return false;
+  const dir = skillDir(paths.skillsDir, target);
   if (stdin.isTTY) {
-    const accepted = await p.confirm({ message: `${name} 스킬을 삭제할까요? (${dir})`, initialValue: false });
+    const accepted = await p.confirm({ message: `${target} 스킬을 삭제할까요? (${dir})`, initialValue: false });
     if (cancelPrompt(accepted) || !accepted) return false;
   }
-  removeSkillDir(paths.skillsDir, name);
-  const message = `삭제됨 · ${name}`;
+  removeSkillDir(paths.skillsDir, target);
+  const message = `삭제됨 · ${target}`;
   if (stdin.isTTY) p.log.success(message);
   else console.log(message);
   return true;

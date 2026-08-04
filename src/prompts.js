@@ -84,13 +84,61 @@ export function ensureRegistry(paths) {
   if (!fs.existsSync(paths.registry)) writeRegistry(paths.registry, []);
 }
 
+/**
+ * p.select를 감싸는 테스트 seam. 대화형 프롬프트는 TTY 없이는 실행할 수 없어
+ * picker 경로가 테스트에서 통째로 빠지므로, 테스트가 선택 결과를 주입할 수 있게 한다.
+ * null을 반환하면 취소(ESC/Ctrl+C)와 같게 처리된다.
+ */
+let selectImpl = null;
+export function setSelectForTest(fn) { selectImpl = fn; }
+
+async function select(options, message) {
+  if (selectImpl) return selectImpl(options, message);
+  const value = await p.select({ message, options });
+  if (cancelPrompt(value)) return null;
+  return value;
+}
+
+/**
+ * p.text를 감싸는 테스트 seam. select와 같은 이유로 둔다.
+ * validate는 p.text와 같은 계약(문제가 있으면 메시지 문자열 반환)이며,
+ * 주입된 구현에도 적용해 테스트가 실제 검증 규칙을 함께 통과하게 한다.
+ * null을 반환하면 취소와 같게 처리된다.
+ */
+let textImpl = null;
+export function setTextForTest(fn) { textImpl = fn; }
+
+export async function askText({ message, placeholder, validate } = {}) {
+  if (textImpl) {
+    const entered = await textImpl({ message, placeholder });
+    if (entered === null || entered === undefined) return null;
+    const problem = validate ? validate(entered) : undefined;
+    if (problem) throw new Error(problem);
+    return entered;
+  }
+  const value = await p.text({ message, placeholder, validate });
+  if (cancelPrompt(value)) return null;
+  return value;
+}
+
 export async function chooseVault(vaults, message) {
-  const name = await p.select({
+  const name = await select(
+    vaults.map((vault) => ({ value: vault.name, label: vault.name, hint: vault.signals || undefined })),
     message,
-    options: vaults.map((vault) => ({ value: vault.name, label: vault.name, hint: vault.signals || undefined })),
-  });
-  if (cancelPrompt(name)) return null;
+  );
+  if (name === null) return null;
   return vaults.find((vault) => vault.name === name);
+}
+
+/**
+ * 이름 인자가 빠졌을 때 목록에서 고르게 한다. 볼트가 아닌 대상(스킬·에이전트·연결)도 쓴다.
+ * items는 { value, label?, hint? } 배열. 취소하면 null.
+ */
+export async function chooseName(items, message) {
+  return select(
+    items.map((item) => ({ value: item.value, label: item.label || item.value, hint: item.hint || undefined })),
+    message,
+  );
 }
 
 // EDITOR는 `code -w`처럼 인자를 포함할 수 있으므로 토큰으로 나눠 사용한다.
