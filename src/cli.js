@@ -16,9 +16,11 @@ import {
 import {
   SKILL_FILE,
   createSkill,
+  existingSkillDir,
   lintSkill,
   listSkills,
   listTemplates,
+  parseSkillName,
   readSkill,
   removeSkill as removeSkillDir,
   renderCommandStub,
