@@ -93,6 +93,19 @@ export async function chooseVault(vaults, message) {
   return vaults.find((vault) => vault.name === name);
 }
 
+/**
+ * 이름 인자가 빠졌을 때 목록에서 고르게 한다. 볼트가 아닌 대상(스킬·에이전트·연결)도 쓴다.
+ * items는 { value, label?, hint? } 배열. 취소하면 null.
+ */
+export async function chooseName(items, message) {
+  const value = await p.select({
+    message,
+    options: items.map((item) => ({ value: item.value, label: item.label || item.value, hint: item.hint || undefined })),
+  });
+  if (cancelPrompt(value)) return null;
+  return value;
+}
+
 // EDITOR는 `code -w`처럼 인자를 포함할 수 있으므로 토큰으로 나눠 사용한다.
 export function splitCommand(value) {
   return (value.match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((token) => token.replace(/^["']|["']$/g, ''));

@@ -12,7 +12,7 @@ export const PUBLISH_LIST_USAGE = 'llmwiki publish list [--json]';
 export const PUBLISH_VIEW_USAGE = 'llmwiki publish view [vault]';
 export const CONNECTION_ADD_USAGE = 'llmwiki connection add [--remote <provider>] [--name <name>] [--remote-token <token>]';
 export const CONNECTION_LIST_USAGE = 'llmwiki connection list [--json]';
-export const CONNECTION_REMOVE_USAGE = 'llmwiki connection remove <name> [--remote <provider>] [--force]';
+export const CONNECTION_REMOVE_USAGE = 'llmwiki connection remove [name] [--remote <provider>] [--force]';
 export const CONFIG_EXPORT_USAGE = 'llmwiki config export [--output <file>]';
 export const CONFIG_IMPORT_USAGE = 'llmwiki config import <file> [--vaults-dir <dir>] [--force]';
 export const INBOX_USAGE = 'llmwiki inbox pull [vault] [--dry-run] [--limit <n>]';
@@ -34,24 +34,24 @@ export const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운
   llmwiki publish remove [vault]  발행 설정 삭제(고아가 된 연결이면 토큰 삭제 여부를 물어봄)
   llmwiki connection add [options]  원격 provider 토큰을 이름 붙여 저장 (워크스페이스별 연결)
   llmwiki connection list [--json]  저장된 연결 목록
-  llmwiki connection remove <name>  저장된 연결(토큰) 삭제
+  llmwiki connection remove [name]  저장된 연결(토큰) 삭제 (생략 시 목록에서 선택)
   llmwiki inbox pull [vault] [--dry-run] [--limit <n>]  원격 inbox의 새 항목을 가져옴
   llmwiki setup                   초기 설정 및 볼트 등록
   llmwiki vault add [options]     볼트 추가/수정
   llmwiki vault list [--json]     등록된 볼트 목록
-  llmwiki vault show <name>       볼트 상세 정보 및 상태
-  llmwiki vault remove <name>     볼트 제거
+  llmwiki vault show [name]       볼트 상세 정보 및 상태 (생략 시 목록에서 선택)
+  llmwiki vault remove [name]     볼트 제거 (생략 시 목록에서 선택)
   llmwiki vault lint [name] [--json]  볼트가 위키 스키마를 지키는지 검사
   llmwiki vault scaffold [name]   누락된 스키마 구조를 생성 (기존 파일 보존)
   llmwiki vault sync [name] [--message <msg>] [--no-push] [--pull-only]  git 백엔드 볼트 동기화
   llmwiki agent list [--json]     에이전트 실행 명령 매핑 확인
-  llmwiki agent set <name> [--add-dir] <cmd> [-- <명령 인자>]  claude/codex를 다른 명령으로 실행
-  llmwiki agent reset <name>      실행 명령을 기본값(claude/codex)으로 복원
+  llmwiki agent set [name] [--add-dir] <cmd> [-- <명령 인자>]  claude/codex를 다른 명령으로 실행
+  llmwiki agent reset [name]      실행 명령을 기본값(claude/codex)으로 복원 (생략 시 목록에서 선택)
   llmwiki skill list [--json]     등록된 커스텀 스킬 목록
   llmwiki skill add <name>        커스텀 스킬 생성/가져오기
-  llmwiki skill show <name>       스킬 상세 정보
-  llmwiki skill edit <name>       $EDITOR로 SKILL.md 편집
-  llmwiki skill remove <name>     스킬 삭제
+  llmwiki skill show [name]       스킬 상세 정보 (생략 시 목록에서 선택)
+  llmwiki skill edit [name]       $EDITOR로 SKILL.md 편집 (생략 시 목록에서 선택)
+  llmwiki skill remove [name]     스킬 삭제 (생략 시 목록에서 선택)
   llmwiki skill templates         내장 스킬 템플릿 목록
   llmwiki skill path [name]       스킬 디렉터리 경로 출력
   llmwiki doctor                  설정·볼트·스킬·에이전트 상태 진단
