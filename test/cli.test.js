@@ -20,7 +20,8 @@ import {
 } from '../src/cli.js';
 import { spawnSync } from 'node:child_process';
 import { getPaths } from '../src/paths.js';
-import { writeRegistry, readRegistry } from '../src/registry.js';
+import { writeRegistry, readRegistry, readAgents } from '../src/registry.js';
+import { setSelectForTest } from '../src/prompts.js';
 import { createSkill } from '../src/skills.js';
 import { isGitAvailable } from '../src/git.js';
 import { getConnectionToken, addConnection, listConnections } from '../src/secrets.js';
@@ -121,6 +122,115 @@ test('name-less subcommands still error in non-TTY instead of hanging on a picke
     await assert.rejects(main(['agent', 'set']), /설정할 에이전트 이름이 필요합니다/);
     await assert.rejects(main(['agent', 'reset']), /초기화할 에이전트 이름이 필요합니다/);
     await assert.rejects(main(['vault', 'sync']), /대상 볼트를 지정하세요/);
+  } finally {
+    if (prev.c === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prev.c;
+    if (prev.d === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prev.d;
+  }
+});
+
+/**
+ * picker 경로는 TTY에서만 돈다. stdin.isTTY를 켜고 select를 주입해
+ * "무엇이 선택지로 제시되는지"와 "선택 결과가 어떻게 쓰이는지"를 검증한다.
+ * onSelect(options, message) → 고를 value (null이면 취소).
+ */
+async function withPicker(onSelect, fn) {
+  const descriptor = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+  Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+  const seen = [];
+  setSelectForTest((options, message) => {
+    seen.push({ message, values: options.map((o) => o.value), options });
+    return onSelect(options, message);
+  });
+  try {
+    return { result: await fn(), seen };
+  } finally {
+    setSelectForTest(null);
+    if (descriptor) Object.defineProperty(process.stdin, 'isTTY', descriptor);
+    else delete process.stdin.isTTY;
+  }
+}
+
+test('vault sync picker offers only git-backend vaults', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-pick-sync-'));
+  const paths = getPaths({ LLM_WIKI_CONFIG_HOME: path.join(root, 'config'), LLM_WIKI_DATA_HOME: path.join(root, 'data') });
+  const vaultPath = path.join(root, 'vault');
+  fs.mkdirSync(vaultPath, { recursive: true });
+  writeRegistry(paths.registry, [
+    { name: 'localonly', path: vaultPath },
+    { name: 'shared', path: vaultPath, backend: 'git', origin: 'https://example.com/w.git' },
+  ]);
+
+  const prev = { c: process.env.LLM_WIKI_CONFIG_HOME, d: process.env.LLM_WIKI_DATA_HOME };
+  process.env.LLM_WIKI_CONFIG_HOME = path.join(root, 'config');
+  process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
+  try {
+    // 취소(null)로 두면 git 동작 없이 선택지만 확인할 수 있다.
+    const { result, seen } = await withPicker(() => null, () => main(['vault', 'sync']));
+    assert.equal(result, false);
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen[0].values, ['shared'], 'local 백엔드 볼트는 선택지에서 제외된다');
+  } finally {
+    if (prev.c === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prev.c;
+    if (prev.d === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prev.d;
+  }
+});
+
+test('vault sync degrades to an info message when no git vault exists', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-pick-nogit-'));
+  const paths = getPaths({ LLM_WIKI_CONFIG_HOME: path.join(root, 'config'), LLM_WIKI_DATA_HOME: path.join(root, 'data') });
+  const vaultPath = path.join(root, 'vault');
+  fs.mkdirSync(vaultPath, { recursive: true });
+  writeRegistry(paths.registry, [{ name: 'a', path: vaultPath }, { name: 'b', path: vaultPath }]);
+
+  const prev = { c: process.env.LLM_WIKI_CONFIG_HOME, d: process.env.LLM_WIKI_DATA_HOME };
+  process.env.LLM_WIKI_CONFIG_HOME = path.join(root, 'config');
+  process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
+  try {
+    // 이름을 지정했을 때처럼 던지지 않고 false를 반환해야 한다(같은 상황·같은 심각도).
+    const { result, seen } = await withPicker(() => null, () => main(['vault', 'sync']));
+    assert.equal(result, false);
+    assert.equal(seen.length, 0, 'git 볼트가 없으면 picker를 띄우지 않는다');
+  } finally {
+    if (prev.c === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prev.c;
+    if (prev.d === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prev.d;
+  }
+});
+
+test('agent reset picker offers only agents with a custom override, and applies the pick', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-pick-agent-'));
+  const paths = getPaths({ LLM_WIKI_CONFIG_HOME: path.join(root, 'config'), LLM_WIKI_DATA_HOME: path.join(root, 'data') });
+  writeRegistry(paths.registry, [], [{ name: 'codex', command: 'dbexec repo run isaac', addDir: false }]);
+
+  const prev = { c: process.env.LLM_WIKI_CONFIG_HOME, d: process.env.LLM_WIKI_DATA_HOME };
+  process.env.LLM_WIKI_CONFIG_HOME = path.join(root, 'config');
+  process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
+  const origLog = console.log;
+  console.log = () => {};
+  try {
+    const { seen } = await withPicker((options) => options[0].value, () => main(['agent', 'reset']));
+    assert.deepEqual(seen[0].values, ['codex'], '기본값인 claude는 초기화 대상이 아니다');
+    assert.equal(readAgents(paths.registry).length, 0, '선택한 에이전트가 실제로 초기화된다');
+  } finally {
+    console.log = origLog;
+    if (prev.c === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prev.c;
+    if (prev.d === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prev.d;
+  }
+});
+
+test('cancelling a picker makes no changes', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-pick-cancel-'));
+  const paths = getPaths({ LLM_WIKI_CONFIG_HOME: path.join(root, 'config'), LLM_WIKI_DATA_HOME: path.join(root, 'data') });
+  const vaultPath = path.join(root, 'vault');
+  fs.mkdirSync(vaultPath, { recursive: true });
+  writeRegistry(paths.registry, [{ name: 'keep', path: vaultPath }, { name: 'other', path: vaultPath }]);
+
+  const prev = { c: process.env.LLM_WIKI_CONFIG_HOME, d: process.env.LLM_WIKI_DATA_HOME };
+  process.env.LLM_WIKI_CONFIG_HOME = path.join(root, 'config');
+  process.env.LLM_WIKI_DATA_HOME = path.join(root, 'data');
+  try {
+    const { result } = await withPicker(() => null, () => main(['vault', 'remove']));
+    assert.equal(result, false);
+    assert.equal(readRegistry(paths.registry).length, 2, '취소하면 볼트가 지워지지 않는다');
   } finally {
     if (prev.c === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prev.c;
     if (prev.d === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prev.d;

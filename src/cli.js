@@ -378,6 +378,7 @@ async function showVault(paths, name) {
   ].join('\n');
   if (stdin.isTTY) console.log(renderNote(details, '볼트 상세'));
   else console.log(details);
+  return true;
 }
 
 async function removeVault(paths, name, { confirm = false } = {}) {
@@ -508,7 +509,12 @@ async function syncVault(paths, args = []) {
     if (!stdin.isTTY) throw new Error(`대상 볼트를 지정하세요.\n사용법: ${VAULT_SYNC_USAGE}`);
     // sync는 git 백엔드만 대상이므로 선택지도 git 볼트로 좁힌다.
     const gitVaults = vaults.filter((item) => item.backend === 'git');
-    if (!gitVaults.length) throw new Error('git 백엔드 볼트가 없습니다. sync는 git 백엔드 볼트만 동기화합니다.');
+    // 하나도 없으면 이름을 지정했을 때와 같은 info 경로로 흘린다(같은 상황에 같은 심각도).
+    if (!gitVaults.length) {
+      const message = 'git 백엔드 볼트가 없습니다. sync는 git 백엔드 볼트만 동기화합니다.';
+      p.log.info(message);
+      return false;
+    }
     vault = await chooseVault(gitVaults, '동기화할 볼트를 선택하세요.');
     if (!vault) return false;
   }
@@ -601,12 +607,27 @@ export function serializeCommand(tokens) {
 }
 
 async function setAgent(paths, name, commandTokens) {
+  // 이름을 생략하면 실행 명령도 함께 비어 있다(dispatch가 첫 토큰을 이름으로 잡으므로).
+  // 그래서 에이전트만 고르게 하면 곧바로 '실행 명령이 필요합니다'로 끝난다 → 명령까지 물어본다.
+  let { command, addDir } = extractAddDirFlag(commandTokens);
   if (!name) {
     if (!stdin.isTTY) throw new Error('설정할 에이전트 이름이 필요합니다.\n사용법: llmwiki agent set <claude|codex> [--add-dir|--no-add-dir] <명령...>');
-    name = await chooseName(SUPPORTED_AGENTS.map((value) => ({ value })), '설정할 에이전트를 선택하세요.');
+    const overrides = new Map(readAgents(paths.registry).map((agent) => [agent.name, agent]));
+    name = await chooseName(
+      SUPPORTED_AGENTS.map((value) => ({ value, hint: overrides.get(value) ? `현재: ${overrides.get(value).command}` : '기본값' })),
+      '설정할 에이전트를 선택하세요.',
+    );
     if (!name) return;
+    if (!command.length) {
+      const entered = await p.text({
+        message: `${name}을 실행할 명령`,
+        placeholder: name === 'codex' ? 'dbexec repo run isaac' : 'vibe agent',
+        validate(value) { if (!value.trim()) return '실행 명령을 입력하세요.'; },
+      });
+      if (cancelPrompt(entered)) return;
+      command = splitCommand(entered.trim());
+    }
   }
-  const { command, addDir } = extractAddDirFlag(commandTokens);
   if (!command.length) throw new Error(`실행 명령이 필요합니다.\n사용법: llmwiki agent set ${name} <명령...>  (예: llmwiki agent set codex dbexec repo run isaac)`);
   // 커스텀 wrapper는 대개 --add-dir를 받지 않으므로 기본 off. 필요하면 --add-dir로 켠다.
   const agent = normalizeAgentCommand({ name, command: serializeCommand(command), addDir: addDir ?? false });
@@ -791,13 +812,16 @@ async function showSkill(paths, name) {
   ].join('\n');
   if (stdin.isTTY) console.log(renderNote(details, '스킬 상세'));
   else console.log(details);
+  return true;
 }
 
 async function editSkill(paths, name) {
   const target = await resolveSkillName(paths, name, '편집할', 'llmwiki skill edit <name>');
   if (!target) return false;
   const file = path.join(skillDir(paths.skillsDir, target), SKILL_FILE);
-  if (!fs.existsSync(file)) throw new Error(`등록되지 않은 스킬입니다: ${target}`);
+  // 디렉터리는 있지만 SKILL.md가 없는 스킬도 목록에 나온다(listSkills는 디렉터리만 본다).
+  // 목록에서 방금 고른 이름을 "등록되지 않았다"고 하면 모순이므로 실제 원인을 알린다.
+  if (!fs.existsSync(file)) throw new Error(`${target} 스킬에 ${SKILL_FILE}가 없습니다: ${file}`);
   openInEditor(file);
   return true;
 }

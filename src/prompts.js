@@ -84,12 +84,27 @@ export function ensureRegistry(paths) {
   if (!fs.existsSync(paths.registry)) writeRegistry(paths.registry, []);
 }
 
+/**
+ * p.select를 감싸는 테스트 seam. 대화형 프롬프트는 TTY 없이는 실행할 수 없어
+ * picker 경로가 테스트에서 통째로 빠지므로, 테스트가 선택 결과를 주입할 수 있게 한다.
+ * null을 반환하면 취소(ESC/Ctrl+C)와 같게 처리된다.
+ */
+let selectImpl = null;
+export function setSelectForTest(fn) { selectImpl = fn; }
+
+async function select(options, message) {
+  if (selectImpl) return selectImpl(options, message);
+  const value = await p.select({ message, options });
+  if (cancelPrompt(value)) return null;
+  return value;
+}
+
 export async function chooseVault(vaults, message) {
-  const name = await p.select({
+  const name = await select(
+    vaults.map((vault) => ({ value: vault.name, label: vault.name, hint: vault.signals || undefined })),
     message,
-    options: vaults.map((vault) => ({ value: vault.name, label: vault.name, hint: vault.signals || undefined })),
-  });
-  if (cancelPrompt(name)) return null;
+  );
+  if (name === null) return null;
   return vaults.find((vault) => vault.name === name);
 }
 
@@ -98,12 +113,10 @@ export async function chooseVault(vaults, message) {
  * items는 { value, label?, hint? } 배열. 취소하면 null.
  */
 export async function chooseName(items, message) {
-  const value = await p.select({
+  return select(
+    items.map((item) => ({ value: item.value, label: item.label || item.value, hint: item.hint || undefined })),
     message,
-    options: items.map((item) => ({ value: item.value, label: item.label || item.value, hint: item.hint || undefined })),
-  });
-  if (cancelPrompt(value)) return null;
-  return value;
+  );
 }
 
 // EDITOR는 `code -w`처럼 인자를 포함할 수 있으므로 토큰으로 나눠 사용한다.
