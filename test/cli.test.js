@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   buildIngestPrompt,
+  buildSkillAuthorPrompt,
   configureRemote,
   connectionAdd,
   connectionRemove,
@@ -95,10 +96,76 @@ test('buildIngestPrompt targets the slash command for claude and a task instruct
   assert.match(buildIngestPrompt('codex', '~/notes.md'), /^wiki-add 태스크를 실행한다\. 입력: ~\/notes\.md$/);
 });
 
+test('buildSkillAuthorPrompt routes to skill-author and tolerates an empty request', () => {
+  assert.equal(buildSkillAuthorPrompt('claude', 'weekly-retro'), '/skill-author weekly-retro');
+  assert.equal(buildSkillAuthorPrompt('claude', ''), '/skill-author');
+  assert.equal(buildSkillAuthorPrompt('codex', 'weekly-retro'), 'skill-author 태스크를 실행한다. 요청: weekly-retro');
+  assert.equal(buildSkillAuthorPrompt('codex', '  '), 'skill-author 태스크를 실행한다.');
+});
+
+// picker(#14)와 예약 이름 해소가 같은 경로(resolveSkillName)에 얹혀 있다. 이름을 명시하면
+// 예약 이름 스킬도 조회되고, 생략하면 picker/에러 계약이 그대로 유지되어야 한다.
+test('skill show resolves a reserved-name skill without breaking the picker contract', async () => {
+  const paths = tmpPaths();
+  const vaultPath = path.join(path.dirname(paths.registry), 'vault');
+  fs.mkdirSync(vaultPath, { recursive: true });
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath }]);
+  // 이름이 겹쳐 동기화에서 생략되는 스킬 — 사용자가 확인할 수 있어야 한다.
+  const hijack = path.join(paths.skillsDir, 'wiki-add');
+  fs.mkdirSync(hijack, { recursive: true });
+  fs.writeFileSync(path.join(hijack, 'SKILL.md'), '---\nname: wiki-add\ndescription: hijack\n---\n');
+
+  const prev = { c: process.env.LLM_WIKI_CONFIG_HOME, d: process.env.LLM_WIKI_DATA_HOME };
+  process.env.LLM_WIKI_CONFIG_HOME = paths.configDir;
+  process.env.LLM_WIKI_DATA_HOME = path.dirname(paths.workspace);
+  const logs = [];
+  const origLog = console.log;
+  console.log = (msg) => logs.push(String(msg));
+  try {
+    await main(['skill', 'show', 'wiki-add']);
+    assert.ok(logs.some((line) => /wiki-add/.test(line)));
+    // 계약 위반은 lint로 안내한다(show와 lint가 같은 판정을 쓴다).
+    assert.ok(logs.some((line) => /skill lint wiki-add/.test(line)), logs.join('\n'));
+    await assert.rejects(main(['skill', 'lint', '../escape']), /소문자/);
+  } finally {
+    console.log = origLog;
+    if (prev.c === undefined) delete process.env.LLM_WIKI_CONFIG_HOME; else process.env.LLM_WIKI_CONFIG_HOME = prev.c;
+    if (prev.d === undefined) delete process.env.LLM_WIKI_DATA_HOME; else process.env.LLM_WIKI_DATA_HOME = prev.d;
+  }
+});
+
+// doctor는 실행 준비 상태 점검이다. 계약을 덜 채운 스킬은 실행을 막지 않으므로,
+// 업그레이드만으로 doctor가 종료 코드 1이 되어서는 안 된다(기존 스킬 회귀 방지).
+test('doctor keeps exit code 0 for a skill that only fails the contract', async () => {
+  const paths = tmpPaths();
+  const vaultPath = path.join(path.dirname(paths.registry), 'vault');
+  fs.mkdirSync(vaultPath, { recursive: true });
+  fs.writeFileSync(path.join(vaultPath, 'index.md'), '# vault');
+  fs.writeFileSync(path.join(vaultPath, 'CLAUDE.md'), '# vault');
+  writeRegistry(paths.registry, [{ name: 'personal', path: vaultPath }]);
+  createSkill(paths.skillsDir, { name: 'half-done', description: 'x' });
+
+  const prev = { c: process.env.LLM_WIKI_CONFIG_HOME, d: process.env.LLM_WIKI_DATA_HOME, code: process.exitCode };
+  process.env.LLM_WIKI_CONFIG_HOME = paths.configDir;
+  process.env.LLM_WIKI_DATA_HOME = path.dirname(paths.workspace);
+  process.exitCode = undefined;
+  try {
+    await main(['doctor']);
+    assert.ok(!process.exitCode, `doctor should not fail on contract findings, got exit ${process.exitCode}`);
+  } finally {
+    process.env.LLM_WIKI_CONFIG_HOME = prev.c;
+    process.env.LLM_WIKI_DATA_HOME = prev.d;
+    process.exitCode = prev.code;
+  }
+});
+
 test('main rejects unknown commands and bad inbox subcommands', async () => {
   await assert.rejects(main(['bogus']), /알 수 없는 명령: bogus/);
   await assert.rejects(main(['inbox', 'push']), /llmwiki inbox pull/);
   await assert.rejects(main(['vault', 'bogus']), /add\|list\|show\|remove\|lint\|scaffold\|sync/);
+  await assert.rejects(main(['skill', 'bogus']), /list\|new\|add\|show\|edit\|lint\|remove/);
+  // `skill new`는 예전에 `skill add`의 별칭이었다. 결정론 플래그는 프롬프트가 아니라 에러로 보낸다.
+  await assert.rejects(main(['skill', 'new', 'retro', '--description', 'x']), /llmwiki skill add/);
 });
 
 // 이름 인자가 빠지면 TTY에서는 목록 선택으로 넘어가고, 비-TTY에서는 기존 에러를 유지한다.
@@ -540,6 +607,8 @@ test('prepareWorkspace publishes user skills as skills, commands and catalog', (
   assert.match(fs.readFileSync(path.join(paths.workspace, 'SKILLS.md'), 'utf8'), /weekly-retro/);
   assert.ok(!fs.existsSync(path.join(paths.workspace, '.claude/skills/wiki-add')));
   assert.doesNotMatch(fs.readFileSync(path.join(paths.workspace, '.claude/commands/wiki-add.md'), 'utf8'), /hijack/);
+  // skill-author도 내장 명령이므로 워크스페이스에 항상 존재해야 한다(llmwiki skill new의 대상).
+  assert.match(fs.readFileSync(path.join(paths.workspace, '.claude/commands/skill-author.md'), 'utf8'), /llmwiki skill lint/);
 
   // 삭제한 스킬은 다음 실행에서 워킬스페이스에도 남지 않는다.
   fs.rmSync(path.join(paths.skillsDir, 'weekly-retro'), { recursive: true, force: true });

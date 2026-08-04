@@ -10,4 +10,4 @@
 
 위키 스키마 정본은 볼트 템플릿 [`templates/vault/`](templates/vault/)에 있다(`CLAUDE.md` + 디렉터리 골격 + `_meta/schema.md`). 신규 볼트 부트스트랩과 스키마 적합성 평가의 기준이며, 결정론 검사는 `llmwiki vault lint`, 구조 교정은 `llmwiki vault scaffold`, 내용 품질 판단은 `/wiki-lint` 워크플로우가 담당한다. 표준 스키마 규칙을 바꾸려면 볼트 사본이 아니라 이 템플릿을 고치고, `_meta/schema.md`의 검사 계약과 `src/lint.js`는 함께 수정한다(드리프트 방지).
 
-커스텀 스킬: 사용자가 `llmwiki skill`로 등록한 스킬 목록은 [`SKILLS.md`](SKILLS.md)에 있다. 정본은 `.claude/skills/<name>/SKILL.md`고, 스킬 추가·수정·삭제는 워크스페이스 파일을 직접 고치지 않고 `llmwiki skill add|edit|remove`로 안내한다.
+커스텀 스킬: 사용자가 `llmwiki skill`로 등록한 스킬 목록은 [`SKILLS.md`](SKILLS.md)에 있다. 정본은 `.claude/skills/<name>/SKILL.md`고, 워크스페이스 파일을 직접 고치지 않는다(매 실행 재생성). 새 스킬을 만들어 달라는 요청은 [`/skill-author`](.claude/commands/skill-author.md) 워크플로우로 처리한다 — 의도를 인터뷰하고, 볼트에 근거가 실제로 있는지 확인하고, `llmwiki skill lint`와 dry-run으로 검증까지 한다. 스캐폴딩·가져오기만 필요하면 `llmwiki skill add`, 수정·삭제는 `llmwiki skill edit|remove`로 안내한다. 계약 검사 항목은 `src/skills.js`의 `lintSkill`이 정본이므로 `skill-author.md`·`templates/skills/`와 함께 수정한다(드리프트 방지).

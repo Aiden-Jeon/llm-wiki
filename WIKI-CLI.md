@@ -140,14 +140,34 @@ CLI는 볼트 목록을 **레지스트리 파일**에서 읽는다. 경로를 �
 - **목록**: 자동 생성되는 [`SKILLS.md`](SKILLS.md) 카탈로그가 등록된 스킬·호출명·설명을 모아 준다. 직접 편집하지 않는다.
 - **정본**: 개별 스킬의 워크플로우는 `.claude/skills/<name>/SKILL.md`다.
 - **라우팅**: 스킬도 이 문서의 라우팅 절차를 그대로 따른다. 대상 볼트를 해소한 뒤 `cd <vault>`한다.
-- **관리**: 사용자가 스킬 추가·수정·삭제를 원하면 워크스페이스 파일을 직접 고치지 않고 `llmwiki skill add|edit|remove`를 안내한다(워크스페이스 사본은 매 실행 덮어써진다).
+- **관리**: 사용자가 스킬 수정·삭제를 원하면 워크스페이스 파일을 직접 고치지 않고 `llmwiki skill edit|remove`를 안내한다(워크스페이스 사본은 매 실행 덮어써진다).
 - 내장 템플릿은 `llmwiki skill templates`로 확인한다 (예: `linkedin-draft`).
 
-스킬 이름은 내장 명령(`wiki-add`, `wiki-search`, `wiki-use`, `wiki-lint`)과 중복할 수 없다.
+스킬 이름은 내장 명령(`wiki-add`, `wiki-search`, `wiki-use`, `wiki-lint`, `skill-author`)과 중복할 수 없다.
+
+### skill-author — 스킬 작성·검증
+
+새 스킬을 만드는 요청은 **`skill-author` 워크플로우**로 처리한다. `wiki-lint`와 같은 계층 구조다:
+결정론 검사와 에이전트 판단을 분리하고, 파일 생성으로 끝내지 않고 **동작을 확인**한다.
+
+1. `llmwiki skill lint [name] [--json]` — 결정론 계약 검사 도구. `SKILL.md`의 frontmatter·필수 섹션·
+   플레이스홀더 잔존·이식성을 검사한다(실행을 막는 위반은 `error`, 품질 휴리스틱은 `warn`).
+   워크플로우가 아니라 `llmwiki vault lint`·`llmwiki doctor`와 같은 진단 도구다.
+   `doctor`는 같은 검사를 개수로 요약하되 `warn`까지만 올린다 — 계약 미충족은 실행을 막지 않으므로
+   실행 준비 점검(`doctor`)과 계약 검사(`skill lint`)를 분리한다.
+2. 의도 인터뷰, 볼트 근거 소스 실사, 초안 작성, dry-run 검증은 `.claude/commands/skill-author.md`가
+   정본이다(Codex는 `AGENTS.md`의 skill-author 태스크). 여기서 스텝을 재기술하지 않는다.
+3. 스캐폴딩·가져오기만 필요하면 결정론 경로인 `llmwiki skill add`를 쓴다. 스켈레톤은 의도적으로
+   줄머리 `TODO:` 표기를 남겨 두므로 채우기 전까지 `skill lint`가 `error`를 보고한다.
+
+두 진입점은 같은 워크플로우로 수렴한다: 터미널에서 `llmwiki skill new [name]`, 세션 안에서
+`/skill-author [요청]`.
 
 ## 듀얼 에이전트
 
 - **Claude Code**: 내장 명령과 커스텀 스킬이 모두 `.claude/commands/*.md` 슬래시 명령으로 노출된다(스킬 명령 파일은 CLI가 생성한다).
 - **Codex**: 내장 명령은 `AGENTS.md` 태스크 목록, 커스텀 스킬은 `SKILLS.md` 카탈로그로 노출된다. 두 표면 모두 이 문서로 라우팅하고 볼트 `CLAUDE.md`로 위임한다.
+
+`llmwiki new`·`llmwiki skill new`는 에이전트를 띄우면서 초기 프롬프트를 주입한다. Claude는 슬래시 명령(`/wiki-add`, `/skill-author`)으로, Codex는 대응 태스크를 자연어로 지시하는 형태다(`src/cli.js`의 `buildIngestPrompt`·`buildSkillAuthorPrompt`).
 
 내장 슬래시 명령은 `AGENTS.md`에 대응 태스크가 있어야 한다(패리티). 커스텀 스킬의 패리티는 `SKILLS.md`가 담당한다.

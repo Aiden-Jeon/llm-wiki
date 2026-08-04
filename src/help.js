@@ -17,6 +17,7 @@ export const CONFIG_EXPORT_USAGE = 'llmwiki config export [--output <file>]';
 export const CONFIG_IMPORT_USAGE = 'llmwiki config import <file> [--vaults-dir <dir>] [--force]';
 export const INBOX_USAGE = 'llmwiki inbox pull [vault] [--dry-run] [--limit <n>]';
 export const SKILL_ADD_USAGE = 'llmwiki skill add <name> [--description <설명>] [--from <경로>] [--template <name>] [--force] [--no-edit]';
+export const SKILL_LINT_USAGE = 'llmwiki skill lint [name] [--json]';
 export const RESET_USAGE = 'llmwiki reset [--purge-vaults] [--force]';
 
 export const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운영합니다.
@@ -48,9 +49,11 @@ export const HELP = `llmwiki — 여러 LLM Markdown 위키를 한 곳에서 운
   llmwiki agent set [name] [--add-dir] <cmd> [-- <명령 인자>]  claude/codex를 다른 명령으로 실행
   llmwiki agent reset [name]      실행 명령을 기본값(claude/codex)으로 복원 (생략 시 목록에서 선택)
   llmwiki skill list [--json]     등록된 커스텀 스킬 목록
-  llmwiki skill add <name>        커스텀 스킬 생성/가져오기
+  llmwiki skill new [name]        에이전트와 함께 스킬을 작성·검증 (권장)
+  llmwiki skill add <name>        커스텀 스킬 스캐폴딩/가져오기 (결정론)
   llmwiki skill show [name]       스킬 상세 정보 (생략 시 목록에서 선택)
   llmwiki skill edit [name]       $EDITOR로 SKILL.md 편집 (생략 시 목록에서 선택)
+  llmwiki skill lint [name] [--json]  SKILL.md가 계약을 지키는지 검사
   llmwiki skill remove [name]     스킬 삭제 (생략 시 목록에서 선택)
   llmwiki skill templates         내장 스킬 템플릿 목록
   llmwiki skill path [name]       스킬 디렉터리 경로 출력
@@ -72,12 +75,27 @@ vault add 옵션:
   git    git repo. --origin으로 clone하고(path 생략 시 ~/llmwiki-vaults/<name>),
          llmwiki vault sync로 pull→commit→push해 여러 머신에서 같은 위키를 작업
 
+커스텀 스킬 만들기 (두 경로):
+  llmwiki skill new [name|요청]   에이전트를 띄워 /skill-author 워크플로우로 작성합니다.
+                                  의도를 인터뷰하고, 실제 볼트에서 근거 소스를 확인하고,
+                                  SKILL.md를 쓴 뒤 skill lint와 dry-run으로 검증합니다.
+  llmwiki skill add <name>        결정론 경로. 스켈레톤을 만들거나 기존 파일을 가져옵니다.
+                                  스캐폴딩만으로는 계약을 만족하지 못하므로 이후
+                                  llmwiki skill lint로 확인하세요.
+
 skill add 옵션:
   --description <설명>   에이전트가 언제 이 스킬을 쓸지 판단할 기준
   --from <경로>          기존 SKILL.md 파일이나 스킬 디렉터리를 가져옴
   --template <name>      내장 템플릿에서 생성 (llmwiki skill templates)
   --force                같은 이름의 스킬을 덮어씀
   --no-edit              생성 후 편집기를 열지 않음
+
+SKILL.md 계약 (llmwiki skill lint):
+  error  frontmatter name(디렉터리명과 일치)·description, ## 근거 소스, ## 워크플로우,
+         남아 있는 줄머리 TODO:/FIXME: 표기, 예약된 이름(wiki-*, skill-author)
+  warn   너무 짧은 description, 트리거 발화 예시 없음, ## 입력·## 주의 누락,
+         머신 의존 절대 경로, 볼트 라우팅 언급 없음
+  예시용 코드블록은 판정에서 제외합니다. doctor는 같은 검사를 warn까지만 올립니다.
 
 추가 정보:
   signals 요청을 이 볼트로 자동 연결할 주제·키워드 (예: 커리어, 이력서, 논문)
