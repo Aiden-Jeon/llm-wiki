@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   createSkill,
+  lintSkill,
   listSkills,
   parseSkillFrontmatter,
   readSkill,
@@ -16,6 +17,49 @@ import {
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'llmwiki-skills-'));
+}
+
+/** lintSkill 결과를 레벨별 label 집합으로 압축한다(문구 변경에 덜 민감한 단정). */
+function findings(dir, level) {
+  return lintSkill(dir).filter((result) => result.level === level).map((result) => result.label);
+}
+
+// 계약을 만족하는 최소 SKILL.md. 각 테스트는 여기서 한 항목만 무너뜨린다.
+function validSkill(name = 'weekly-retro') {
+  return `---
+name: ${name}
+description: 위키 log.md를 근거로 주간 회고 초안을 만든다. "주간 회고", "이번 주 정리"라고 말할 때 사용한다.
+---
+
+# Weekly Retro
+
+대상 볼트에 쌓인 기록을 근거로 회고 초안을 만든다. 대상 볼트는 \`WIKI-CLI.md\`의 라우팅 절차로 해소한다.
+
+## 입력
+
+기간(기본 최근 7일)과 관점을 확인한다. 모호하면 질문한다.
+
+## 근거 소스
+
+대상 볼트의 \`log.md\`와 기간 내 변경 페이지를 읽는다.
+
+## 워크플로우
+
+1. 기간·관점 확인.
+2. 근거 읽기.
+3. 초안 생성 후 채팅 출력.
+
+## 주의
+
+- 근거에 없는 성과를 만들지 않는다.
+`;
+}
+
+function writeSkill(name, content) {
+  const dir = path.join(tmpDir(), name);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'SKILL.md'), content);
+  return dir;
 }
 
 test('parseSkillFrontmatter reads quoted and colon-containing values', () => {
@@ -108,6 +152,68 @@ test('listSkills skips non-skill entries and sorts by name', () => {
   assert.throws(() => removeSkill(skillsDir, 'alpha'), /\ub4f1\ub85d\ub418\uc9c0 \uc54a\uc740/);
 });
 
+test('lintSkill passes a skill that satisfies the contract', () => {
+  const dir = writeSkill('weekly-retro', validSkill());
+  assert.deepEqual(lintSkill(dir).map((result) => result.level), ['success']);
+});
+
+test('lintSkill reports a missing SKILL.md instead of throwing', () => {
+  const dir = path.join(tmpDir(), 'empty');
+  fs.mkdirSync(dir, { recursive: true });
+  assert.deepEqual(findings(dir, 'error'), ['파일']);
+});
+
+test('lintSkill rejects the unedited scaffold so scaffolding alone never passes', () => {
+  const skillsDir = tmpDir();
+  const { dir } = createSkill(skillsDir, { name: 'fresh' });
+  const errors = findings(dir, 'error');
+  assert.ok(errors.includes('description'), `expected description error, got ${errors.join(',')}`);
+  assert.ok(errors.includes('본문'), `expected body error, got ${errors.join(',')}`);
+});
+
+test('lintSkill requires frontmatter name to match the directory', () => {
+  const dir = writeSkill('weekly-retro', validSkill('other-name'));
+  assert.deepEqual(findings(dir, 'error'), ['frontmatter']);
+});
+
+test('lintSkill flags reserved names that workspace sync would skip', () => {
+  const dir = writeSkill('skill-author', validSkill('skill-author'));
+  assert.deepEqual(findings(dir, 'error'), ['이름']);
+});
+
+test('lintSkill requires the evidence and workflow sections', () => {
+  const dir = writeSkill('thin', validSkill('thin').replace(/## 근거 소스[\s\S]*?## 워크플로우/, '## 워크플로우'));
+  assert.deepEqual(findings(dir, 'error'), ['섹션']);
+});
+
+test('lintSkill warns on a description with no trigger phrases', () => {
+  const dir = writeSkill('vague', validSkill('vague').replace(/description: .*/, 'description: 대상 볼트의 기록을 모아 주간 회고 초안을 만드는 스킬이다. 기간과 관점을 확인한 뒤 초안을 생성한다.'));
+  assert.deepEqual(findings(dir, 'error'), []);
+  assert.deepEqual(findings(dir, 'warn'), ['description']);
+});
+
+test('lintSkill accepts 디스패처 in place of 입력', () => {
+  const dir = writeSkill('dispatch', validSkill('dispatch').replace('## 입력', '## 디스패처'));
+  assert.deepEqual(lintSkill(dir).map((result) => result.level), ['success']);
+});
+
+// 계약(lintSkill)과 배포되는 템플릿이 어긋나면 사용자가 만든 첫 스킬부터 경고를 본다.
+test('bundled skill templates satisfy the contract they are examples of', () => {
+  const templatesDir = path.join(import.meta.dirname, '..', 'templates', 'skills');
+  const names = fs.readdirSync(templatesDir, { withFileTypes: true }).filter((entry) => entry.isDirectory());
+  assert.ok(names.length, 'expected at least one bundled template');
+  for (const entry of names) {
+    const results = lintSkill(path.join(templatesDir, entry.name));
+    const problems = results.filter((result) => result.level === 'error' || result.level === 'warn');
+    assert.deepEqual(problems, [], `${entry.name}: ${problems.map((problem) => `${problem.label}: ${problem.detail}`).join(' / ')}`);
+  }
+});
+
+test('lintSkill warns on machine-dependent absolute paths', () => {
+  const dir = writeSkill('hardcoded', validSkill('hardcoded').replace('`log.md`', '`/Users/someone/vaults/personal/log.md`'));
+  assert.deepEqual(findings(dir, 'warn'), ['이식성']);
+});
+
 test('renderCommandStub quotes descriptions so frontmatter stays valid YAML', () => {
   const stub = renderCommandStub({ name: 'demo', description: 'A: b "c". \ub2e4\uc74c \ubb38\uc7a5\uc740 \ubb34\uc2dc\ud55c\ub2e4.' });
   assert.match(stub, /^---\ndescription: "A: b \\"c\\."?/);
@@ -116,7 +222,7 @@ test('renderCommandStub quotes descriptions so frontmatter stays valid YAML', ()
 });
 
 test('renderSkillsCatalog escapes table separators and handles empty state', () => {
-  assert.match(renderSkillsCatalog([]), /llmwiki skill add/);
+  assert.match(renderSkillsCatalog([]), /llmwiki skill new/);
   const catalog = renderSkillsCatalog([{ name: 'demo', description: 'a | b' }]);
   assert.match(catalog, /\| demo \| `\/demo` · `demo` \| a \\\| b \|/);
 });

@@ -109,25 +109,59 @@ llmwiki config import ~/llmwiki-settings.json --vaults-dir ~/llmwiki-vaults
 
 반복하는 사용자별 작업은 `SKILL.md`로 등록할 수 있습니다. 등록된 스킬은 Claude Code 슬래시 명령과 Codex 태스크로 함께 노출됩니다.
 
+만드는 경로는 두 가지입니다. 쓸 만한 스킬은 "무엇을 자동화할지"와 "볼트에 근거가 실제로 있는지"에 달려 있어서, 보통은 에이전트와 함께 만드는 쪽을 권합니다.
+
+### 에이전트와 함께 작성 (권장)
+
+```bash
+llmwiki skill new                 # 무엇을 만들지부터 인터뷰
+llmwiki skill new weekly-retro    # 이름을 미리 정한 경우
+llmwiki skill new "주간 회고를 만들어줘"
+```
+
+에이전트를 띄우고 `skill-author` 워크플로우를 시작합니다. 세션 안에서는 `/skill-author`로 직접 부를 수도 있습니다. 워크플로우는 이렇게 진행됩니다:
+
+1. **인터뷰** — 반복 작업의 구체 사례, 트리거 발화, 입출력, 경계(하지 않을 일), 쓰기 여부를 확인합니다.
+2. **근거 소스 실사** — 대상 볼트를 라우팅으로 해소하고 `index.md`로 필요한 자료가 실제로 있는지 확인합니다. 없으면 스킬을 쓰기 전에 알려 줍니다.
+3. **초안 작성** — `llmwiki skill path <name>` 아래에 `SKILL.md`를 씁니다.
+4. **검증** — `llmwiki skill lint`로 계약을 통과시킨 뒤, 1단계의 사례로 워크플로우를 그대로 실행해 봅니다(read-only dry-run). 빈틈이 나오면 고치고 다시 돌립니다.
+
+### 결정론 스캐폴딩·가져오기
+
 ```bash
 # 내장 템플릿에서 생성
 llmwiki skill templates
 llmwiki skill add linkedin-draft --template linkedin-draft
 
-# 새 스킬을 만들고 편집기로 열기
+# 스켈레톤 생성 후 편집기로 열기
 llmwiki skill add weekly-retro \
   --description "주간 회고 생성. '주간 회고', '이번 주 정리' 요청에 사용"
 
 # 기존 파일이나 디렉터리 가져오기
 llmwiki skill add paper-review --from ~/skills/paper-review
+```
 
+스켈레톤은 모든 지시문에 `TODO`를 남겨 두므로, 채우기 전까지 `llmwiki skill lint`가 `error`를 보고합니다. 생성 직후에도 미충족 항목 수를 함께 안내합니다.
+
+### 검사와 관리
+
+```bash
 llmwiki skill list
+llmwiki skill lint                # 전체 스킬 계약 검사
+llmwiki skill lint weekly-retro --json
 llmwiki skill show weekly-retro
 llmwiki skill edit weekly-retro
 llmwiki skill remove weekly-retro
 ```
 
-스킬 원본 위치는 `llmwiki skill path [name]`으로 확인할 수 있습니다. `SKILL.md`에는 `name`과 `description` frontmatter가 필요하며, 이름은 `wiki-add`, `wiki-search`, `wiki-use`, `wiki-lint`와 중복할 수 없습니다.
+`llmwiki skill lint`는 `llmwiki vault lint`와 같은 계층의 결정론 도구입니다. `error`가 있으면 종료 코드 1을 반환하고, `llmwiki doctor`도 같은 검사 결과를 요약해 보여 줍니다.
+
+| 수준 | 검사 항목 |
+|---|---|
+| `error` | frontmatter `name`(디렉터리명과 일치)·`description`, `## 근거 소스`·`## 워크플로우` 섹션, 남아 있는 `TODO`/`FIXME`, 예약된 이름 |
+| `warn` | 너무 짧은 `description`, 트리거 발화 예시 없음, `## 입력`·`## 주의` 누락, 머신 의존 절대 경로, 볼트 라우팅 언급 없음 |
+
+스킬 원본 위치는 `llmwiki skill path [name]`으로 확인할 수 있습니다. 이름은 `wiki-add`, `wiki-search`, `wiki-use`, `wiki-lint`, `skill-author`와 중복할 수 없습니다.
 
 ## 주요 환경 변수
 

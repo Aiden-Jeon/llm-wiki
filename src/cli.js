@@ -16,6 +16,7 @@ import {
 import {
   SKILL_FILE,
   createSkill,
+  lintSkill,
   listSkills,
   listTemplates,
   readSkill,
@@ -67,6 +68,7 @@ import {
   CONFIG_IMPORT_USAGE,
   INBOX_USAGE,
   SKILL_ADD_USAGE,
+  SKILL_LINT_USAGE,
   RESET_USAGE,
   HELP,
 } from './help.js';
@@ -306,7 +308,8 @@ async function setup(paths, args) {
       p.outro(vaults.length ? '`llmwiki`를 실행해 시작하세요.' : '`llmwiki vault add`로 언제든 등록할 수 있습니다.');
       return;
     }
-    if (action === 'skill') await addSkill(paths, [], { outro: false });
+    // setup 루프 안에서 에이전트를 띄우면 설정이 중단된다. authoring은 setup 후 안내한다.
+    if (action === 'skill') await addSkill(paths, [], { outro: false, allowAuthoring: false });
     if (action === 'add') await addVault(paths, [], { outro: false });
     if (action === 'edit') {
       const selected = await chooseVault(vaults, '수정할 볼트를 선택하세요.');
@@ -671,6 +674,15 @@ function skillLine(skill) {
   return `${skill.name}${skill.description ? ` · ${skill.description}` : ''}`;
 }
 
+/** 계약 위반을 한 줄로 요약한다. 항목별 상세는 `llmwiki skill lint <name>`이 낸다. */
+function skillFindingSummary(dir) {
+  const findings = lintSkill(dir);
+  const errors = findings.filter((finding) => finding.level === 'error').length;
+  const warnings = findings.filter((finding) => finding.level === 'warn').length;
+  if (!errors && !warnings) return null;
+  return [errors && `위반 ${errors}개`, warnings && `경고 ${warnings}개`].filter(Boolean).join(' · ');
+}
+
 function listSkillsCommand(paths, args = []) {
   const { options, rest } = parseOptions(args, { allowed: ['json'], booleans: ['json'], usage: 'llmwiki skill list [--json]' });
   if (rest.length) throw new Error(`알 수 없는 인자: ${rest.join(' ')}\n사용법: llmwiki skill list [--json]`);
@@ -681,16 +693,17 @@ function listSkillsCommand(paths, args = []) {
     return;
   }
   if (!skills.length) {
-    console.log('등록된 커스텀 스킬이 없습니다. `llmwiki skill add <name>`으로 만들거나 `llmwiki skill templates`로 내장 템플릿을 확인하세요.');
+    console.log('등록된 커스텀 스킬이 없습니다. `llmwiki skill new <name>`으로 만들거나 `llmwiki skill templates`로 내장 템플릿을 확인하세요.');
     return;
   }
   if (stdin.isTTY) {
     p.intro(`llmwiki · 커스텀 스킬 ${skills.length}개`);
     for (const skill of skills) {
+      const summary = skillFindingSummary(skill.dir);
       console.log(renderNote([
         skill.description || '설명 없음',
         skill.dir,
-        ...skill.issues.map((issue) => `⚠ ${issue}`),
+        ...(summary ? [`⚠ ${summary} · llmwiki skill lint ${skill.name}`] : []),
       ].join('\n'), skill.name));
     }
     p.outro('호출: Claude `/<name>` · Codex `<name>`');
@@ -699,7 +712,10 @@ function listSkillsCommand(paths, args = []) {
   }
 }
 
-async function addSkill(paths, args, { outro = true } = {}) {
+// 대화형 `skill add`의 "시작 방법" 선택에서 에이전트 authoring으로 넘어가는 센티넬.
+const AUTHOR_WITH_AGENT = ' author';
+
+async function addSkill(paths, args, { outro = true, allowAuthoring = true } = {}) {
   const { options, rest } = parseOptions(args, {
     allowed: ['name', 'description', 'from', 'template', 'force', 'edit', 'no-edit'],
     booleans: ['force', 'edit', 'no-edit'],
@@ -717,19 +733,23 @@ async function addSkill(paths, args, { outro = true } = {}) {
     from = template.dir;
   }
 
-  if (!from && !rest.length && !options.name && stdin.isTTY && templates.length) {
-    const choice = await p.select({
-      message: '시작 방법',
-      options: [
-        { value: '', label: '빈 스킬로 시작', hint: '기본 구조만 갖는 SKILL.md 생성' },
-        ...templates.map((template) => ({
-          value: template.name,
-          label: `템플릿 · ${template.name}`,
-          hint: (template.description || '').slice(0, 60),
-        })),
-      ],
-    });
+  const startOptions = [
+    ...(allowAuthoring ? [{
+      value: AUTHOR_WITH_AGENT,
+      label: '에이전트와 함께 작성',
+      hint: '볼트를 읽어 근거를 확인하고 dry-run으로 검증까지 (권장)',
+    }] : []),
+    { value: '', label: '빈 스킬로 시작', hint: '스켈레톤 SKILL.md만 생성 — 직접 채워야 함' },
+    ...templates.map((template) => ({
+      value: template.name,
+      label: `템플릿 · ${template.name}`,
+      hint: (template.description || '').slice(0, 60),
+    })),
+  ];
+  if (!from && !rest.length && !options.name && stdin.isTTY && startOptions.length > 1) {
+    const choice = await p.select({ message: '시작 방법', options: startOptions });
     if (cancelPrompt(choice)) return false;
+    if (choice === AUTHOR_WITH_AGENT) return startSkillAuthoring(paths, undefined, []);
     if (choice) {
       templateName = choice;
       from = templates.find((template) => template.name === choice).dir;
@@ -774,6 +794,13 @@ async function addSkill(paths, args, { outro = true } = {}) {
       : await p.confirm({ message: '지금 SKILL.md를 편집할까요?', initialValue: true });
     if (!cancelPrompt(open) && open) openInEditor(path.join(dir, SKILL_FILE));
   }
+  // 스캐폴딩만으로는 계약을 만족하지 못한다. 검증·보완 경로를 항상 함께 알린다.
+  const findings = lintSkill(dir).filter((result) => result.level === 'error' || result.level === 'warn');
+  if (findings.length) {
+    const summary = `계약 미충족 ${findings.length}개 · llmwiki skill lint ${name} 으로 확인하거나 llmwiki skill new ${name} 으로 에이전트와 함께 채우세요.`;
+    if (stdin.isTTY) p.log.warn(summary);
+    else console.error(`[WARN] 스킬: ${summary}`);
+  }
   const hint = `다음 실행부터 Claude /${name} · Codex ${name} 로 호출됩니다.`;
   if (!stdin.isTTY) console.log(hint);
   else if (outro) p.outro(hint);
@@ -784,15 +811,18 @@ async function addSkill(paths, args, { outro = true } = {}) {
 /**
  * 스킬 이름을 해소한다. 이름이 있으면 그대로 검증하고, 없으면 TTY에서 목록으로 고르게 한다.
  * verb는 프롬프트·에러 문구에 쓰는 동작 이름('확인할' 등). 취소하면 null.
+ *
+ * 조회·수정·삭제 경로이므로 예약 이름(`existingSkillDir`)도 해소한다 — 이름이 겹쳐
+ * 동기화에서 생략된 스킬을 확인하고 고칠 수 있어야 한다.
  */
 async function resolveSkillName(paths, name, verb, usage) {
   if (name) {
-    if (!fs.existsSync(skillDir(paths.skillsDir, name))) throw new Error(`등록되지 않은 스킬입니다: ${name}`);
+    if (!fs.existsSync(existingSkillDir(paths.skillsDir, name))) throw new Error(`등록되지 않은 스킬입니다: ${name}`);
     return name;
   }
   if (!stdin.isTTY) throw new Error(`${verb} 스킬 이름이 필요합니다.\n사용법: ${usage}`);
   const skills = listSkills(paths.skillsDir);
-  if (!skills.length) throw new Error('등록된 커스텀 스킬이 없습니다. `llmwiki skill add <name>`으로 만드세요.');
+  if (!skills.length) throw new Error('등록된 커스텀 스킬이 없습니다. `llmwiki skill new <name>`으로 만드세요.');
   return chooseName(
     skills.map((skill) => ({ value: skill.name, hint: skill.description || undefined })),
     `${verb} 스킬을 선택하세요.`,
@@ -802,15 +832,16 @@ async function resolveSkillName(paths, name, verb, usage) {
 async function showSkill(paths, name) {
   const target = await resolveSkillName(paths, name, '확인할', 'llmwiki skill show <name>');
   if (!target) return false;
-  const dir = skillDir(paths.skillsDir, target);
+  const dir = existingSkillDir(paths.skillsDir, target);
   const skill = readSkill(dir);
+  const summary = skillFindingSummary(dir);
   const details = [
     `이름   ${skill.name}`,
     `설명   ${skill.description || '없음'}`,
     `경로   ${skill.dir}`,
     `파일   ${fs.readdirSync(dir).sort().join(', ') || '없음'}`,
     `호출   Claude /${skill.name} · Codex ${skill.name}`,
-    `상태   ${skill.issues.length ? skill.issues.join(' / ') : '정상'}`,
+    `상태   ${summary ? `${summary} · llmwiki skill lint ${skill.name}` : '정상'}`,
   ].join('\n');
   if (stdin.isTTY) console.log(renderNote(details, '스킬 상세'));
   else console.log(details);
@@ -820,7 +851,7 @@ async function showSkill(paths, name) {
 async function editSkill(paths, name) {
   const target = await resolveSkillName(paths, name, '편집할', 'llmwiki skill edit <name>');
   if (!target) return false;
-  const file = path.join(skillDir(paths.skillsDir, target), SKILL_FILE);
+  const file = path.join(existingSkillDir(paths.skillsDir, target), SKILL_FILE);
   // 디렉터리는 있지만 SKILL.md가 없는 스킬도 목록에 나온다(listSkills는 디렉터리만 본다).
   // 목록에서 방금 고른 이름을 "등록되지 않았다"고 하면 모순이므로 실제 원인을 알린다.
   if (!fs.existsSync(file)) throw new Error(`${target} 스킬에 ${SKILL_FILE}가 없습니다: ${file}`);
@@ -831,7 +862,7 @@ async function editSkill(paths, name) {
 async function removeSkillCommand(paths, name) {
   const target = await resolveSkillName(paths, name, '삭제할', 'llmwiki skill remove <name>');
   if (!target) return false;
-  const dir = skillDir(paths.skillsDir, target);
+  const dir = existingSkillDir(paths.skillsDir, target);
   if (stdin.isTTY) {
     const accepted = await p.confirm({ message: `${target} 스킬을 삭제할까요? (${dir})`, initialValue: false });
     if (cancelPrompt(accepted) || !accepted) return false;
@@ -841,6 +872,48 @@ async function removeSkillCommand(paths, name) {
   if (stdin.isTTY) p.log.success(message);
   else console.log(message);
   return true;
+}
+
+/**
+ * 스킬을 SKILL.md 계약에 대해 검사한다. `vault lint`와 같은 계층 구조다:
+ * 결정론 검사는 이 명령, 내용 품질 판단은 `/skill-author`의 리뷰 단계가 담당한다.
+ */
+function lintSkillsCommand(paths, args = []) {
+  const { options, rest } = parseOptions(args, { allowed: ['json'], booleans: ['json'], usage: SKILL_LINT_USAGE });
+  if (rest.length > 1) throw new Error(`알 수 없는 인자: ${rest.slice(1).join(' ')}\n사용법: ${SKILL_LINT_USAGE}`);
+
+  const targets = rest[0]
+    ? [{ name: validateSkillName(rest[0]), dir: skillDir(paths.skillsDir, rest[0]) }]
+    : listSkills(paths.skillsDir).map((skill) => ({ name: skill.name, dir: skill.dir }));
+  if (rest[0] && !fs.existsSync(targets[0].dir)) throw new Error(`등록되지 않은 스킬입니다: ${targets[0].name}`);
+
+  const report = targets.map((target) => ({ skill: target.name, dir: target.dir, results: lintSkill(target.dir) }));
+
+  // --json은 스킬이 없어도 기계 판독 형식을 유지한다(vault lint와 같은 계약).
+  if (options.json) {
+    console.log(JSON.stringify({ skillsDir: paths.skillsDir, skills: report }, null, 2));
+    if (report.some((entry) => entry.results.some((result) => result.level === 'error'))) process.exitCode = 1;
+    return;
+  }
+
+  if (!targets.length) {
+    console.log('등록된 커스텀 스킬이 없습니다. `llmwiki skill new <name>`으로 만드세요.');
+    return;
+  }
+
+  let errors = 0;
+  for (const entry of report) {
+    const entryErrors = entry.results.filter((result) => result.level === 'error').length;
+    errors += entryErrors;
+    if (stdin.isTTY) {
+      p.intro(`llmwiki skill lint · ${entry.skill}`);
+      for (const result of entry.results) p.log[result.level](`${result.label} · ${result.detail}`);
+      p.outro(entryErrors ? `${entry.skill}: 위반 ${entryErrors}개` : `${entry.skill}: 계약 위반 없음`);
+    } else {
+      for (const result of entry.results) console.log(`[${result.level.toUpperCase()}] ${entry.skill} · ${result.label}: ${result.detail}`);
+    }
+  }
+  if (errors) process.exitCode = 1;
 }
 
 function listSkillTemplates(paths) {
@@ -1013,10 +1086,17 @@ function doctor(paths) {
   }
 
   const skills = listSkills(paths.skillsDir);
-  if (!skills.length) add('info', '커스텀 스킬', `없음 · 필요하면 llmwiki skill add <name> (${paths.skillsDir})`);
+  if (!skills.length) add('info', '커스텀 스킬', `없음 · 필요하면 llmwiki skill new <name> (${paths.skillsDir})`);
   for (const skill of skills) {
-    if (skill.issues.length) add('warn', `스킬 ${skill.name}`, skill.issues.join(' / '));
-    else add('success', `스킬 ${skill.name}`, skill.description);
+    // doctor는 개수 요약만 낸다. 항목별 상세는 `llmwiki skill lint <name>`이 담당한다.
+    const findings = lintSkill(skill.dir);
+    const errors = findings.filter((finding) => finding.level === 'error').length;
+    const warnings = findings.filter((finding) => finding.level === 'warn').length;
+    if (!errors && !warnings) add('success', `스킬 ${skill.name}`, skill.description);
+    else {
+      const counts = [errors && `위반 ${errors}개`, warnings && `경고 ${warnings}개`].filter(Boolean).join(' · ');
+      add(errors ? 'error' : 'warn', `스킬 ${skill.name}`, `${counts} · llmwiki skill lint ${skill.name}`);
+    }
   }
 
   const labels = { claude: 'Claude Code', codex: 'Codex' };
@@ -1099,6 +1179,36 @@ async function startIngest(paths, requestedAgent, inputArgs = []) {
   if (!input) throw new Error('추가할 입력이 필요합니다.\n사용법: llmwiki new <url|경로|텍스트>');
   const agent = resolveAgent(paths, requestedAgent);
   return launchAgent(paths, agent, { initialPrompt: buildIngestPrompt(agent, input) });
+}
+
+/**
+ * 에이전트가 실행할 스킬 authoring 초기 프롬프트를 만든다(buildIngestPrompt와 같은 규약).
+ * 이름·의도는 선택이다 — 없으면 authoring 워크플로우의 인터뷰 단계가 물어본다.
+ */
+export function buildSkillAuthorPrompt(agent, request = '') {
+  const input = request.trim();
+  if (agent === 'codex') {
+    return input
+      ? `skill-author 태스크를 실행한다. 요청: ${input}`
+      : 'skill-author 태스크를 실행한다.';
+  }
+  return input ? `/skill-author ${input}` : '/skill-author';
+}
+
+/**
+ * `llmwiki skill new [name|요청]`: 에이전트를 띄워 스킬을 인터뷰·초안·검증까지 함께 만든다.
+ * 결정론 스캐폴딩(`skill add`)과 달리 실제 볼트를 읽어 근거 소스를 확인하고 dry-run으로
+ * 동작을 검증하는 것이 목적이다.
+ */
+async function startSkillAuthoring(paths, requestedAgent, inputArgs = []) {
+  // `skill new`는 이전에 `skill add`의 별칭이었다. 결정론 플래그를 프롬프트에 섞지 않고
+  // 의도한 명령으로 되돌려 보낸다.
+  const flag = inputArgs.find((arg) => arg.startsWith('--'));
+  if (flag) {
+    throw new Error(`skill new는 자유 요청만 받습니다: ${flag}\n결정론 스캐폴딩·가져오기는 llmwiki skill add를 사용하세요.\n사용법: llmwiki skill new [name|요청]`);
+  }
+  const agent = resolveAgent(paths, requestedAgent);
+  return launchAgent(paths, agent, { initialPrompt: buildSkillAuthorPrompt(agent, inputArgs.join(' ')) });
 }
 
 // 비-TTY 입력(파이프)을 끝까지 읽는다. `echo ... | llmwiki capture --vault x`를 지원한다.
@@ -1396,16 +1506,22 @@ export async function main(args) {
   if (command === 'skill' || command === 'skills') {
     const [action = 'list', ...skillArgs] = rest;
     if (action === 'list' || action === 'ls') return listSkillsCommand(paths, skillArgs);
-    if (action === 'add' || action === 'new') {
+    // `skill new`는 에이전트와 함께 작성·검증하고, `skill add`는 결정론 스캐폴딩·가져오기다.
+    if (action === 'new' || action === 'author') {
+      const agent = ['claude', 'codex'].includes(skillArgs[0]) ? skillArgs.shift() : undefined;
+      return startSkillAuthoring(paths, agent, skillArgs);
+    }
+    if (action === 'add') {
       if (stdin.isTTY) p.intro('llmwiki · 커스텀 스킬 추가');
       return addSkill(paths, skillArgs);
     }
     if (action === 'show') return showSkill(paths, skillArgs[0]);
     if (action === 'edit') return editSkill(paths, skillArgs[0]);
+    if (action === 'lint') return lintSkillsCommand(paths, skillArgs);
     if (action === 'remove' || action === 'rm') return removeSkillCommand(paths, skillArgs[0]);
     if (action === 'templates') return listSkillTemplates(paths);
     if (action === 'path') return console.log(skillArgs[0] ? skillDir(paths.skillsDir, skillArgs[0]) : paths.skillsDir);
-    throw new Error('사용법: llmwiki skill <list|add|show|edit|remove|templates|path>');
+    throw new Error('사용법: llmwiki skill <list|new|add|show|edit|lint|remove|templates|path>');
   }
   if (command === 'config') {
     const [action, ...configArgs] = rest;
